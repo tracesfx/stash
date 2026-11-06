@@ -1,0 +1,50 @@
+[package]
+name = "stash"
+version = "0.1.0"
+description = "Fast inspiration capture"
+edition = "2024"
+
+[lib]
+# `_lib` suffix avoids a Windows bin/lib name clash, see rust-lang/cargo#8519
+name = "stash_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-drag = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+sha2 = "0.10"
+base64 = "0.22"
+tiny-skia = "0.12"
+fontdue = "0.9"
+arboard = "3"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_System_DataExchange", "Win32_System_Com", "Win32_UI_Accessibility", "Win32_System_Variant", "Win32_System_Registry"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-appender = "0.2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
+
+# Image encoding in unoptimized dependencies is ~20x slower; keep dev builds representative.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

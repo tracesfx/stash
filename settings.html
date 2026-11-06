@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stash settings</title>
+    <style>
+      body { overflow-y: auto; }
+      main { padding: 22px 26px 26px; max-width: 560px; margin: 0 auto; }
+      h1 { font: 600 20px var(--font-display); margin: 0 0 18px; }
+      .card { backdrop-filter: var(--blur); box-shadow: var(--rim); background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-l); padding: 4px 16px; margin-bottom: 16px; }
+      .set { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 0; border-bottom: 1px solid var(--line); }
+      .set:last-child { border-bottom: 0; }
+      .set.col { flex-direction: column; align-items: stretch; gap: 8px; }
+      .lab { font-weight: 600; }
+      .hint { color: var(--faint); font-size: 12px; margin-top: 2px; line-height: 1.45; }
+      .grow { flex: 1; min-width: 0; }
+      .keys { display: flex; gap: 6px; align-items: center; min-height: 28px; }
+      .keys.rec kbd { border-color: var(--accent); color: var(--accent); }
+      .keys .rect { color: var(--accent); }
+      .line { display: flex; gap: 8px; }
+      .num { width: 92px; text-align: right; }
+      input[type=range] { width: 170px; accent-color: var(--accent); }
+      .val { width: 54px; text-align: right; font-variant-numeric: tabular-nums; color: var(--dim); }
+      .themes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; padding: 14px 0; }
+      .th { padding: 0; border: 2px solid var(--line); border-radius: var(--r-m); background: none; cursor: pointer; overflow: hidden; text-align: center; transition: border-color var(--dur) var(--ease), transform var(--dur) var(--ease); color: var(--txt); }
+      .th:hover { transform: translateY(-1px); }
+      .th.on { border-color: var(--accent); }
+      .th i { display: block; height: 46px; }
+      .th span { display: block; padding: 6px 0 7px; font-size: 12px; background: var(--surface); }
+      .sw-system { background: linear-gradient(110deg, #f3f3f7 50%, #1f1f26 50%); }
+      .sw-light { background: linear-gradient(135deg, #ffffff, #e3e3ea); }
+      .sw-dark { background: linear-gradient(135deg, #2a2a33, #15151a); }
+      .sw-glass { background: radial-gradient(circle at 25% 30%, #7aa2ff, transparent 55%), radial-gradient(circle at 75% 70%, #c07bff, transparent 55%), #26304f; box-shadow: inset 0 1px 0 rgba(255,255,255,.5); }
+      .gl { padding: 4px 0 14px; display: none; }
+      body.is-glass .gl { display: block; }
+      .gl .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+      .gl input[type=color] { width: 40px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; cursor: pointer; }
+      .gl .preview { flex: 1; min-width: 80px; height: 32px; border-radius: 8px; border: 1px solid var(--line); box-shadow: var(--rim); }
+      .presets { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+      .pr { width: 64px; height: 36px; border-radius: 10px; border: 2px solid var(--line); cursor: pointer; padding: 0; position: relative; }
+      .pr:hover { border-color: var(--accent); }
+      .pr span { position: absolute; left: 0; right: 0; bottom: -17px; font-size: 10px; color: var(--faint); text-align: center; }
+      .presets { margin-bottom: 18px; }
+      .bar { display: flex; align-items: center; gap: 12px; }
+      #status { color: var(--dim); }
+      #status.err { color: var(--danger); }
+      footer { color: var(--faint); font-size: 11px; margin-top: 18px; }
+    </style>
+  </head>
+  <body class="glass">
+    <main>
+      <h1>Settings</h1>
+
+      <div class="card">
+        <div class="set col" style="border:0"><div><div class="lab">Theme</div><div class="hint">Applies to the gallery, settings, popup and radial wheel. Liquid Glass blurs the desktop behind the windows.</div></div>
+          <div class="themes" id="themes">
+            <button class="th" data-t="system"><i class="sw-system"></i><span>System</span></button>
+            <button class="th" data-t="light"><i class="sw-light"></i><span>Light</span></button>
+            <button class="th" data-t="dark"><i class="sw-dark"></i><span>Dark</span></button>
+            <button class="th" data-t="glass"><i class="sw-glass"></i><span>Liquid Glass</span></button>
+          </div>
+          <div class="gl">
+            <div class="lab">Liquid Glass colours</div>
+            <div class="hint">The gradient behind the gallery, settings, popup and radial wheel.</div>
+            <div class="row"><input type="color" id="ga" /><input type="color" id="gb" /><input type="color" id="gc" /><div class="preview" id="gprev"></div><button class="btn" id="greset">Reset</button></div>
+            <div class="presets" id="gpresets"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="set">
+          <div class="grow"><div class="lab">Capture shortcut</div><div class="hint">Tap to snip a region. Hold for the radial wheel. Needs a modifier (Ctrl, Alt, Shift or Win).</div></div>
+          <div class="keys" id="keys"></div>
+          <button class="btn" id="rec">Change</button>
+        </div>
+        <div class="set">
+          <div class="grow"><div class="lab">Wheel hold delay</div><div class="hint">How long to hold before the wheel opens.</div></div>
+          <input id="holdr" type="range" min="80" max="600" step="10" />
+          <span class="val"><span id="holdv"></span> ms</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="set col">
+          <div><div class="lab">Library folder</div><div class="hint">A OneDrive or Dropbox folder keeps it synced. Changing this only affects new captures; move existing files yourself to keep them in the gallery.</div></div>
+          <div class="line"><input id="lib" class="field" type="text" /><button class="btn" id="browse">Browse…</button></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="set">
+          <div class="grow"><div class="lab">Start with Windows</div><div class="hint" id="autohint">Runs quietly in the tray at sign-in.</div></div>
+          <label class="switch"><input id="autostart" type="checkbox" /><i></i></label>
+        </div>
+        <div class="set">
+          <div class="grow"><div class="lab">Confirmation popup</div><div class="hint">A small preview after each capture, with click-to-caption. Captions can still be added in the gallery.</div></div>
+          <label class="switch"><input id="popup" type="checkbox" /><i></i></label>
+        </div>
+        <div class="set">
+          <div class="grow"><div class="lab">Record page URL from browsers</div><div class="hint">Reads the address bar through Windows UI Automation. Chromium browsers turn on their accessibility mode when asked, which can slow page loads a little.</div></div>
+          <label class="switch"><input id="url" type="checkbox" /><i></i></label>
+        </div>
+      </div>
+
+      <div class="bar"><button class="btn pri" id="save">Save changes</button><span id="status"></span></div>
+      <footer id="ver"></footer>
+    </main>
+    <script type="module" src="/src/settings.ts"></script>
+  </body>
+</html>
