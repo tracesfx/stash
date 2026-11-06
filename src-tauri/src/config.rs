@@ -23,6 +23,8 @@ pub struct Config {
     pub theme: String,
     /// Liquid Glass gradient colours (3 hex stops).
     pub glass: Vec<String>,
+    /// Index text inside images with the built-in Windows OCR (local).
+    pub ocr: bool,
 }
 
 impl Default for Config {
@@ -36,6 +38,7 @@ impl Default for Config {
             show_popup: true,
             autostart: true,
             theme: "system".into(),
+            ocr: true,
             glass: crate::theme::DEFAULT_GLASS.iter().map(|s| s.to_string()).collect(),
         }
     }

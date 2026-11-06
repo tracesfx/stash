@@ -70,6 +70,20 @@
       #viewer .vc { position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); padding: 8px 16px; border-radius: 999px; background: rgba(30,30,38,.85); color: #eee; max-width: 70vw; text-align: center; }
       #viewer .vn { position: absolute; top: 50%; width: 44px; height: 44px; border-radius: 50%; border: 0; background: rgba(40,40,50,.8); color: #fff; font-size: 20px; cursor: pointer; }
       #viewer .vn:hover { background: rgba(70,70,86,.95); }
+      .sws { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; padding: 4px 8px 4px 10px; }
+      .sw { aspect-ratio: 1; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; box-shadow: inset 0 0 0 1px rgba(0,0,0,.25); transition: transform var(--dur) var(--ease); }
+      .sw:hover { transform: scale(1.12); }
+      .sw.on { border-color: var(--txt); }
+      .strip { display: flex; height: 4px; }
+      .strip i { flex: 1; }
+      .pal { display: flex; gap: 6px; }
+      .dot { width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--line); cursor: pointer; padding: 0; transition: transform var(--dur) var(--ease); }
+      .dot:hover { transform: scale(1.1); }
+      details.ocr { margin-top: 14px; font-size: 12px; color: var(--dim); }
+      details.ocr summary { cursor: pointer; color: var(--faint); }
+      details.ocr div { margin-top: 6px; padding: 8px 10px; background: var(--surface); border-radius: var(--r-s); max-height: 160px; overflow: auto; white-space: pre-wrap; user-select: text; }
+      #viewer .vi { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: rgba(30,30,38,.8); color: #ddd; font-size: 12px; }
+      #header-spacer { flex: 1; }
       /* toast + drop */
       #toast { backdrop-filter: var(--blur); position: fixed; bottom: 22px; left: 50%; transform: translate(-50%, 12px); background: var(--surface-solid); border: 1px solid var(--line); box-shadow: var(--shadow); padding: 10px 16px; border-radius: 999px; display: flex; gap: 14px; align-items: center; opacity: 0; pointer-events: none; transition: opacity 180ms var(--ease), transform 180ms var(--ease); z-index: 30; }
       #toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
@@ -89,6 +103,8 @@
           <svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg>
           <input id="q" class="field" type="text" placeholder="Search captions, tags, apps, URLs…" autocomplete="off" spellcheck="false" />
         </div>
+        <button class="btn" id="shuffle" title="Show random items (S)"><svg class="ico" viewBox="0 0 16 16"><path d="M2 4.5h2.5c3 0 4 7 7 7H14M2 11.5h2.5c1 0 1.800-.8 2.600-2M14 4.500h-2.500c-1 0-1.800.8-2.600 2M12 2.500l2 2-2 2M12 9.500l2 2-2 2"/></svg>Shuffle</button>
+        <button class="btn" id="export" title="Export the selection, or everything shown"><svg class="ico" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3M3 13.500h10"/></svg>Export</button>
         <span id="count"></span>
       </header>
       <nav id="rail"></nav>

@@ -7,6 +7,8 @@ mod gallery;
 mod hotkeys;
 mod library;
 mod note;
+mod ocr;
+mod palette;
 mod overlay;
 mod popup;
 mod snip;
@@ -98,6 +100,10 @@ pub fn run() {
             gallery::gallery_open_url,
             gallery::gallery_copy,
             gallery::gallery_import,
+            gallery::gallery_set_board,
+            gallery::gallery_backfill,
+            gallery::gallery_export,
+            gallery::gallery_open_path,
             settings::settings_get,
             settings::settings_save,
             settings::hotkey_suspend,

@@ -140,6 +140,7 @@ fn put(root: &Path, it: Item, write: impl FnOnce(&Path) -> Result<()>) -> Result
 pub fn save_image(root: &Path, rgba: &[u8], w: u32, h: u32, meta: ImageMeta) -> Result<Saved> {
     let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
     let png = encode_png(&rgb, w, h)?;
+    let (thumb, palette) = thumb_and_palette(&rgb, w, h)?;
     let sidecar = put(
         root,
         Item {
@@ -149,12 +150,12 @@ pub fn save_image(root: &Path, rgba: &[u8], w: u32, h: u32, meta: ImageMeta) -> 
             method: meta.method,
             source: &meta.source,
             original_path: None,
-            extra: json!({ "image": { "w": w, "h": h, "monitor": meta.monitor.name, "scale": meta.monitor.scale, "rect": meta.rect } }),
+            extra: json!({ "image": { "w": w, "h": h, "monitor": meta.monitor.name, "scale": meta.monitor.scale, "rect": meta.rect }, "palette": palette }),
         },
         |p| write_atomic(p, &png),
     )?;
     let meta = format!("{} · {w}×{h}{}", method_label(meta.method), via(&meta.source));
-    Ok(Saved { sidecar, preview: Preview::Image(thumbnail_data_url(&rgb, w, h)?), meta })
+    Ok(Saved { sidecar, preview: Preview::Image(thumb), meta })
 }
 
 fn is_url(s: &str) -> bool {
@@ -237,17 +238,28 @@ pub fn save_clip(root: &Path, clip: Clip, method: &'static str, source: &SourceI
     }
 }
 
-fn thumbnail_data_url(rgb: &[u8], w: u32, h: u32) -> Result<String> {
+/// Popup thumbnail (PNG data URL) and the dominant-colour palette, from one downscale.
+fn thumb_and_palette(rgb: &[u8], w: u32, h: u32) -> Result<(String, Vec<String>)> {
     let img = image::RgbImage::from_raw(w, h, rgb.to_vec()).context("thumb buffer")?;
     let t = image::imageops::thumbnail(&img, 560, 340);
+    let palette = crate::palette::dominant(t.as_raw(), 5);
     let png = encode_png(t.as_raw(), t.width(), t.height())?;
-    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
+    Ok((format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)), palette))
+}
+
+static SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Read-modify-write a sidecar under a global lock (captions, tags, OCR and palette updates can race).
+/// Unknown fields are preserved;  is refreshed.
+pub fn update_sidecar(sidecar: &Path, f: impl FnOnce(&mut Value)) -> Result<()> {
+    let _g = SIDECAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut v = read_json(sidecar)?;
+    f(&mut v);
+    v["modified"] = Value::String(Local::now().to_rfc3339_opts(SecondsFormat::Millis, true));
+    write_atomic(sidecar, serde_json::to_string_pretty(&v)?.as_bytes())
 }
 
 /// Sets the caption in an existing sidecar, preserving all other (even unknown) fields.
 pub fn set_caption(sidecar: &Path, caption: &str) -> Result<()> {
-    let mut v = read_json(sidecar)?;
-    v["caption"] = Value::String(caption.to_string());
-    v["modified"] = Value::String(Local::now().to_rfc3339_opts(SecondsFormat::Millis, true));
-    write_atomic(sidecar, serde_json::to_string_pretty(&v)?.as_bytes())
+    update_sidecar(sidecar, |v| v["caption"] = Value::String(caption.to_string()))
 }

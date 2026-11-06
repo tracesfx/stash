@@ -2,12 +2,14 @@ import "./theme";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
+import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 
 interface Item {
   id: string; kind: string; created: string; method: string; caption: string; tags: string[];
   source_title: string; process: string; url: string | null; ext: string; name: string; bytes: number;
   mime: string; w: number | null; h: number | null; original_path: string | null;
   text: string | null; path: string; icon: string;
+  palette: string[]; board: string | null; ocr: string | null;
 }
 
 const BATCH = 120;
@@ -31,8 +33,9 @@ let anchor = -1;
 let dragging = false;
 let toastTimer: number | undefined;
 // filters
-const f = { date: "all", type: "all", tag: "", app: "" };
+const f = { date: "all", type: "all", tag: "", app: "", color: "", board: "" };
 let viewIdx = -1;
+let shuffleJustStarted = false;
 
 const thumb = (it: Item) => `http://stash.localhost/thumb/${it.id}`;
 const full = (it: Item) => `http://stash.localhost/full/${it.id}`;
@@ -46,19 +49,47 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""):
   return e;
 }
 
+// ---------- colours ----------
+const BUCKETS: [string, string][] = [
+  ["red", "#e5484d"], ["orange", "#f08a24"], ["yellow", "#f5d90a"], ["green", "#3fb950"], ["teal", "#1fc2b5"], ["blue", "#3b82f6"],
+  ["purple", "#8b5cf6"], ["pink", "#ec4899"], ["brown", "#8b5a3c"], ["gray", "#8a8f98"], ["black", "#16161a"], ["white", "#f4f4f6"],
+];
+function bucketOf(hex: string): string {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2, d = mx - mn;
+  const sat = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
+  if (l < 0.14) return "black";
+  if (l > 0.9) return "white";
+  if (sat < 0.14) return "gray";
+  let h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  h = (h * 60 + 360) % 360;
+  if (h >= 12 && h < 48 && l < 0.4) return "brown";
+  if (h < 12 || h >= 345) return "red";
+  if (h < 40) return "orange";
+  if (h < 68) return "yellow";
+  if (h < 165) return "green";
+  if (h < 200) return "teal";
+  if (h < 255) return "blue";
+  if (h < 295) return "purple";
+  return "pink";
+}
+const hasColor = (it: Item, name: string) => it.palette.slice(0, 3).some((c) => bucketOf(c) === name);
+
 // ---------- data ----------
 async function load(force = false) {
   const next = await invoke<Item[]>("gallery_list");
+  const changed = !(items.length && next.length === items.length && next[0]?.id === items[0]?.id);
   // Re-rendering on every window focus would reset scroll/selection; only do it when the library changed.
-  if (!force && items.length && next.length === items.length && next[0]?.id === items[0]?.id) return;
+  if (!force && !changed) return;
   items = next;
   selected = new Set([...selected].filter((id) => items.some((i) => i.id === id)));
   renderRail();
   filter();
+  backfill();
 }
 
 function haystack(it: Item) {
-  return [it.caption, it.tags.join(" "), it.source_title, it.process, it.url ?? "", it.name, it.text ?? "", it.kind, it.method, it.created.slice(0, 10)].join("\n").toLowerCase();
+  return [it.caption, it.tags.join(" "), it.source_title, it.process, it.url ?? "", it.name, it.text ?? "", it.board ?? "", it.ocr ?? "", it.kind, it.method, it.created.slice(0, 10)].join("\n").toLowerCase();
 }
 
 function inDate(it: Item): boolean {
@@ -74,11 +105,15 @@ function filter() {
     if (f.type !== "all" && it.kind !== f.type) return false;
     if (f.tag && !it.tags.some((t) => t.toLowerCase() === f.tag.toLowerCase())) return false;
     if (f.app && it.process !== f.app) return false;
+    if (f.board && it.board !== f.board) return false;
+    if (f.color && !hasColor(it, f.color)) return false;
     if (!inDate(it)) return false;
     const h = haystack(it);
     return terms.every((t) => {
       if (t.startsWith("#")) return it.tags.some((x) => x.toLowerCase().includes(t.slice(1)));
       if (t.startsWith("type:")) return it.kind.startsWith(t.slice(5));
+      if (t.startsWith("color:")) return it.palette.slice(0, 3).some((c) => bucketOf(c).startsWith(t.slice(6)));
+      if (t.startsWith("board:")) return (it.board ?? "").toLowerCase().includes(t.slice(6));
       return h.includes(t);
     });
   });
@@ -107,6 +142,21 @@ function renderRail() {
   const types: [string, string][] = [["all", "Everything"], ["image", "Images"], ["text", "Text"], ["link", "Links"], ["file", "Files"]];
   section("Type", types.map(([v, l]) =>
     railItem(l, v === "all" ? null : items.filter((i) => i.kind === v).length, f.type === v, () => { f.type = v; renderRail(); filter(); })));
+
+  const boards = new Map<string, number>();
+  for (const it of items) if (it.board) boards.set(it.board, (boards.get(it.board) ?? 0) + 1);
+  section("Boards", top(boards, 20).map(([b, n]) => railItem(b, n, f.board === b, set("board", b))));
+  if (items.some((i) => i.palette.length)) {
+    const wrap = el("div", "sws");
+    for (const [name, hex] of BUCKETS) {
+      const b = el("button", "sw" + (f.color === name ? " on" : ""));
+      b.style.background = hex;
+      b.title = name;
+      b.onclick = () => { f.color = f.color === name ? "" : name; renderRail(); filter(); };
+      wrap.append(b);
+    }
+    rail.append(el("div", "rh", "Colour"), wrap);
+  }
 
   const tags = new Map<string, number>(), apps = new Map<string, number>();
   for (const it of items) {
@@ -146,6 +196,11 @@ function card(it: Item): HTMLElement {
     const fl = el("div", "f");
     fl.append(el("span", "badge", it.ext || "file"), el("span", "", it.original_path?.split(/[\\/]/).pop() ?? it.name));
     c.append(fl);
+  }
+  if (it.palette.length && isImg(it)) {
+    const strip = el("div", "strip");
+    for (const col of it.palette.slice(0, 5)) { const i = el("i"); i.style.background = col; strip.append(i); }
+    c.append(strip);
   }
   if (it.caption) c.append(el("div", "cap", it.caption));
   const acts = el("div", "acts");
@@ -230,6 +285,8 @@ grid.addEventListener("dragstart", async (e) => {
 
 function openViewer(i: number) {
   if (i < 0 || i >= shown.length) return;
+  if (!viewer.classList.contains("on") && !history.length && viewIdx === -1 && !shuffleJustStarted) shuffle = false;
+  shuffleJustStarted = false;
   viewIdx = i;
   const it = shown[i];
   viewer.replaceChildren();
@@ -241,15 +298,16 @@ function openViewer(i: number) {
     viewer.append(el("div", "vt", it.text ?? it.name));
   }
   if (it.caption) viewer.append(el("div", "vc", it.caption));
+  if (shuffle) viewer.append(el("div", "vi", "Shuffle · Space or → next · ← back · Esc to exit"));
   for (const [dir, label, side] of [[-1, "‹", "left"], [1, "›", "right"]] as const) {
     const b = el("button", "vn", label);
     b.style[side] = "22px";
-    b.onclick = (e) => { e.stopPropagation(); openViewer(viewIdx + dir); };
+    b.onclick = (e) => { e.stopPropagation(); stepViewer(dir); };
     viewer.append(b);
   }
   viewer.classList.add("on");
 }
-viewer.addEventListener("click", () => { viewer.classList.remove("on"); viewIdx = -1; });
+viewer.addEventListener("click", () => { if (shuffle) { stepViewer(1); return; } viewer.classList.remove("on"); viewIdx = -1; });
 
 // ---------- detail panel ----------
 function fmtBytes(n: number) { return n > 1e6 ? (n / 1e6).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1e3)) + " KB"; }
@@ -261,9 +319,14 @@ function showDetail() {
   if (!sel.length) return;
   if (sel.length > 1) {
     detail.append(el("h3", "", `${sel.length} selected`));
+    detail.append(boardEditor(sel));
+    const row = el("div", "row");
+    const ex = el("button", "btn", "Export…");
+    ex.onclick = () => exportItems(sel.map((s) => s.id));
     const del = el("button", "btn danger", "Move to trash");
     del.onclick = () => trash(sel.map((s) => s.id));
-    detail.append(del);
+    row.append(ex, del);
+    detail.append(row);
     return;
   }
   const it = sel[0];
@@ -296,13 +359,30 @@ function showDetail() {
     });
     inp.addEventListener("blur", save);
   }
-  detail.append(el("label", "l", "Caption"), cap, el("label", "l", "Tags"), tags);
+  detail.append(el("label", "l", "Caption"), cap, el("label", "l", "Tags"), tags, boardEditor([it]));
+  if (it.palette.length) {
+    const pal = el("div", "pal");
+    for (const col of it.palette) {
+      const b = el("button", "dot");
+      b.style.background = col;
+      b.title = `${col} — click to filter by this colour`;
+      b.onclick = () => { f.color = bucketOf(col); renderRail(); filter(); };
+      pal.append(b);
+    }
+    detail.append(el("label", "l", "Palette"), pal);
+  }
+  if (it.ocr) {
+    const d = el("details", "ocr");
+    d.append(el("summary", "", "Text found in image"), el("div", "", it.ocr));
+    detail.append(d);
+  }
 
   const row = el("div", "row");
   const mk = (label: string, fn: () => void, cls = "") => { const b = el("button", "btn " + cls, label); b.onclick = fn; row.append(b); };
   if (canCopy(it)) mk("Copy", () => copyItem(it));
   mk("Show in folder", () => invoke("gallery_reveal", { id: it.id }));
   if (it.url) mk("Open source", () => invoke("gallery_open_url", { url: it.url }));
+  mk("Export…", () => exportItems([it.id]));
   mk("Trash", () => trash([it.id]), "danger");
   detail.append(row);
 
@@ -319,13 +399,94 @@ function showDetail() {
   detail.append(meta);
 }
 
+// ---------- boards ----------
+function boardEditor(sel: Item[]): HTMLElement {
+  const wrap = el("div");
+  wrap.append(el("label", "l", "Board"));
+  const inp = el("input", "field"); inp.type = "text"; inp.placeholder = "Add to a board…"; inp.setAttribute("list", "boards");
+  inp.value = sel.every((s) => s.board === sel[0].board) ? sel[0].board ?? "" : "";
+  const dl = el("datalist"); dl.id = "boards";
+  [...new Set(items.map((i) => i.board).filter(Boolean) as string[])].forEach((b) => { const o = el("option"); o.value = b; dl.append(o); });
+  const save = async () => {
+    const name = inp.value.trim();
+    if (sel.length === 1 && (sel[0].board ?? "") === name) return;
+    await invoke("gallery_set_board", { ids: sel.map((s) => s.id), board: name });
+    sel.forEach((s) => (s.board = name || null));
+    renderRail();
+    filter();
+    flash(name ? `Added ${sel.length} to “${name}”` : "Removed from board");
+  };
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); inp.blur(); } });
+  inp.addEventListener("change", save);
+  wrap.append(inp, dl);
+  return wrap;
+}
+
+// ---------- export ----------
+async function exportItems(ids?: string[]) {
+  const list = ids ?? (selected.size ? [...selected] : shown.map((i) => i.id));
+  if (!list.length) { flash("Nothing to export"); return; }
+  const dest = await pickFolder({ directory: true, title: `Export ${list.length} item${list.length === 1 ? "" : "s"} to…` });
+  if (typeof dest !== "string") return;
+  try {
+    const out = await invoke<string>("gallery_export", { ids: list, dest });
+    flash(`Exported ${list.length} item${list.length === 1 ? "" : "s"}`, { label: "Open folder", fn: () => invoke("gallery_open_path", { path: out }) });
+  } catch (e) {
+    flash(String(e));
+  }
+}
+$("export").addEventListener("click", () => exportItems());
+
+// ---------- shuffle ----------
+let shuffle = false;
+let history: number[] = [];
+function randomIdx(): number {
+  if (shown.length < 2) return 0;
+  let i = viewIdx;
+  while (i === viewIdx) i = Math.floor(Math.random() * shown.length);
+  return i;
+}
+function startShuffle() {
+  if (!shown.length) { flash("Nothing to shuffle"); return; }
+  shuffle = true;
+  shuffleJustStarted = true;
+  history = [];
+  viewIdx = -1;
+  openViewer(randomIdx());
+}
+function stepViewer(dir: number) {
+  if (!shuffle) { openViewer(viewIdx + dir); return; }
+  if (dir > 0) { history.push(viewIdx); openViewer(randomIdx()); }
+  else if (history.length) openViewer(history.pop()!);
+}
+$("shuffle").addEventListener("click", startShuffle);
+
+// ---------- background palette + OCR indexing ----------
+let backfilling = false;
+async function backfill() {
+  if (backfilling) return;
+  backfilling = true;
+  try {
+    for (;;) {
+      const r = await invoke<{ done: { id: string; palette: string[]; ocr: string | null }[]; remaining: number }>("gallery_backfill", { limit: 6 });
+      for (const d of r.done) {
+        const it = items.find((i) => i.id === d.id);
+        if (it) { if (d.palette.length) it.palette = d.palette; if (d.ocr) it.ocr = d.ocr; }
+      }
+      if (r.done.length) renderRail();
+      if (!r.remaining || !r.done.length) break;
+    }
+  } catch { /* window closed or indexing unavailable */ }
+  backfilling = false;
+}
+
 // ---------- actions ----------
-function flash(msg: string, undo?: () => void) {
+function flash(msg: string, action?: { label: string; fn: () => void }) {
   toast.replaceChildren(el("span", "", msg));
-  if (undo) { const a = el("a", "", "Undo"); a.onclick = () => { undo(); toast.classList.remove("on"); }; toast.append(a); }
+  if (action) { const a = el("a", "", action.label); a.onclick = () => { action.fn(); toast.classList.remove("on"); }; toast.append(a); }
   toast.classList.add("on");
   clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => toast.classList.remove("on"), undo ? 6000 : 2200);
+  toastTimer = window.setTimeout(() => toast.classList.remove("on"), action ? 7000 : 2200);
 }
 
 const copyItem = (it: Item) => invoke("gallery_copy", { id: it.id }).then(() => flash("Copied")).catch((e) => flash(String(e)));
@@ -337,7 +498,7 @@ async function trash(ids: string[]) {
   renderRail();
   filter();
   showDetail();
-  flash(`Moved ${moved.length} to trash`, async () => { await invoke("gallery_restore", { ids: moved }); await load(true); });
+  flash(`Moved ${moved.length} to trash`, { label: "Undo", fn: async () => { await invoke("gallery_restore", { ids: moved }); await load(true); } });
 }
 
 // ---------- events ----------
@@ -346,13 +507,14 @@ q.addEventListener("input", filter);
 window.addEventListener("keydown", (e) => {
   const inField = (e.target as HTMLElement).tagName === "INPUT";
   if (viewer.classList.contains("on")) {
-    if (e.key === "Escape") { viewer.classList.remove("on"); }
-    else if (e.key === "ArrowRight") openViewer(viewIdx + 1);
-    else if (e.key === "ArrowLeft") openViewer(viewIdx - 1);
+    if (e.key === "Escape") { viewer.classList.remove("on"); shuffle = false; }
+    else if (e.key === "ArrowRight" || e.key === " " || e.key === "Enter") { e.preventDefault(); stepViewer(1); }
+    else if (e.key === "ArrowLeft") stepViewer(-1);
     return;
   }
   if (e.ctrlKey && e.key.toLowerCase() === "f") { e.preventDefault(); q.focus(); q.select(); }
   else if (e.key === "/" && !inField) { e.preventDefault(); q.focus(); }
+  else if (!inField && e.key.toLowerCase() === "s" && !e.ctrlKey) startShuffle();
   else if (e.key === "Escape") { if (inField) (e.target as HTMLElement).blur(); else { selected.clear(); refreshSel(); } }
   else if (!inField && e.key === "Delete" && selected.size) trash([...selected]);
   else if (!inField && (e.key === " " || e.key === "Enter") && selected.size === 1) { e.preventDefault(); openViewer(shown.findIndex((i) => i.id === [...selected][0])); }

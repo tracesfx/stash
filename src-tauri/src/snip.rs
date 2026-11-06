@@ -242,6 +242,7 @@ fn save_crop(app: &AppHandle, frame: Arc<Frame>, rect: RECT, source: SourceInfo,
         match library::save_image(&library_root(&app), &rgba, w, h, meta) {
             Ok(saved) => {
                 tracing::info!("saved {method} {w}x{h} in {} ms", t0.elapsed().as_millis());
+                crate::ocr::spawn(&app, saved.sidecar.clone());
                 popup::show(&app, Some(saved.sidecar), saved.preview, saved.meta);
             }
             Err(e) => {
@@ -286,6 +287,7 @@ fn run_clip(app: &AppHandle, p: Pending, copy_first: bool) -> Result<()> {
     let monitor = winutil::monitor_at(p.cursor.x, p.cursor.y);
     let (saved, n) = library::save_clip(&library_root(app), clip, method, &source, monitor)?;
     tracing::info!("saved {method} ({n} item(s))");
+    crate::ocr::spawn(app, saved.sidecar.clone());
     popup::show(app, Some(saved.sidecar), saved.preview, saved.meta);
     Ok(())
 }

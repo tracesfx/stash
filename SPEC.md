@@ -86,7 +86,8 @@ Settings: library path, hotkey rebinding, wheel hold delay, start with Windows (
 - **M2 More capture (done, partly verified):** C2–C6 (window, screen, selection, clipboard, note) + source window and browser URL metadata. Gallery wedge stays dimmed until M3.
 - **M3 Gallery (built; grid verified, rest needs hands-on test):** masonry grid, lazy cached thumbnails, instant search (#tag, type:), type filter, caption/tag edit, multi-select, trash with undo, show-in-folder, open source URL, copy, native drag-out, file-drop import. Colour/date filters wait on palette extraction (M5).
 - **M4 Polish (built):** settings window (rebind shortcut, hold delay, library folder, autostart, URL capture, popup toggle), autostart (release builds only), per-user NSIS installer (1.8 MB), portable single exe. Measured on release build: idle 21.8 MB RSS, 0 CPU, no webview process. Not built from the original settings list: sound, WebP output, include-cursor.
-- **M5+ (optional):** palette extraction, shuffle view, boards, Notion/Miro export, local OCR search, short GIF/clip capture.
+- **M5 (built; export and shuffle untested by hand):** dominant-colour palette (stored in the sidecar, colour filter + swatches in the gallery, `color:blue` search), boards (one board per item; rail + multi-select assign), shuffle view (S), export of a selection/view to a folder with files + index.md + notion.csv, and local OCR (Windows built-in engine) so screenshots are searchable by the text inside them; existing images are indexed in the background. Not built: short GIF/clip capture (conflicts with the no-recording principle), direct Notion/Miro API sync (no network by design).
+- **Post-v1:** voice dictation (SPEC section 11), optional further polish.
 
 ## 11. Post-v1 goals
 These are explicitly out of v1 scope; v1 must not make them harder.

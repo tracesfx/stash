@@ -2,12 +2,12 @@ import "./theme";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
-interface Config { library_path: string; hotkey: string; hold_ms: number; capture_url: boolean; show_popup: boolean; autostart: boolean; theme: string; glass: string[]; }
+interface Config { library_path: string; hotkey: string; hold_ms: number; capture_url: boolean; show_popup: boolean; autostart: boolean; theme: string; glass: string[]; ocr: boolean; }
 interface Dto { config: Config; autostart_supported: boolean; version: string; }
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const keys = $("keys"), holdr = $<HTMLInputElement>("holdr"), holdv = $("holdv"), lib = $<HTMLInputElement>("lib");
-const autostart = $<HTMLInputElement>("autostart"), popup = $<HTMLInputElement>("popup"), url = $<HTMLInputElement>("url");
+const ocr = $<HTMLInputElement>("ocr"), autostart = $<HTMLInputElement>("autostart"), popup = $<HTMLInputElement>("popup"), url = $<HTMLInputElement>("url");
 const status = $("status"), recBtn = $("rec");
 
 let cfg: Config;
@@ -37,6 +37,7 @@ async function init() {
   holdv.textContent = holdr.value;
   lib.value = cfg.library_path;
   autostart.checked = cfg.autostart;
+  ocr.checked = cfg.ocr;
   popup.checked = cfg.show_popup;
   url.checked = cfg.capture_url;
   if (!d.autostart_supported) {
@@ -149,6 +150,7 @@ $("save").addEventListener("click", async () => {
     autostart: autostart.checked,
     theme: cfg.theme,
     glass: cfg.glass,
+    ocr: ocr.checked,
   };
   if (!next.library_path) { say("Choose a library folder.", true); return; }
   try {
