@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stash whiteboard</title>
+    <style>
+      html, body { overflow: hidden; }
+      #cv { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+      #bar, #props { position: fixed; z-index: 5; display: flex; gap: 4px; align-items: center; padding: 6px; background: var(--surface-solid); border: 1px solid var(--line); border-radius: var(--r-l); box-shadow: var(--shadow); backdrop-filter: var(--blur); }
+      #bar { top: 12px; left: 50%; transform: translateX(-50%); }
+      #props { bottom: 12px; left: 50%; transform: translateX(-50%); gap: 10px; padding: 6px 12px; }
+      .tb { width: 34px; height: 34px; display: grid; place-items: center; border: 0; background: none; border-radius: var(--r-s); cursor: pointer; color: var(--txt); }
+      .tb:hover { background: color-mix(in srgb, var(--hover) 24%, transparent); }
+      .tb.on { background: var(--hover); color: var(--on-hover); }
+      .tb svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .sep { width: 1px; height: 22px; background: var(--line); margin: 0 4px; }
+      .col { width: 22px; height: 22px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; box-shadow: inset 0 0 0 1px rgba(0,0,0,.3); }
+      .col.on { border-color: var(--txt); }
+      #props input[type=range] { width: 110px; accent-color: var(--hover); }
+      #zoom { color: var(--dim); font-size: 12px; min-width: 44px; text-align: center; }
+      #status { position: fixed; right: 14px; top: 14px; font-size: 12px; color: var(--faint); z-index: 5; }
+      #ta { position: fixed; z-index: 6; display: none; border: 1px dashed var(--hover); background: transparent; color: inherit; outline: none; resize: none; padding: 2px; overflow: hidden; font-family: var(--font); white-space: pre; }
+      #hint { position: fixed; left: 14px; bottom: 14px; color: var(--faint); font-size: 11px; z-index: 5; pointer-events: none; }
+    </style>
+  </head>
+  <body class="glass">
+    <canvas id="cv"></canvas>
+    <div id="bar"></div>
+    <div id="props"></div>
+    <div id="status"></div>
+    <div id="hint">Space+drag or middle mouse: pan · Ctrl+wheel: zoom · Ctrl+S: save · Double-click a video: play/pause · Del: delete · Ctrl+Z/Y: undo/redo · paste or drop images</div>
+    <textarea id="ta" spellcheck="true"></textarea>
+    <script type="module" src="/src/board.ts"></script>
+  </body>
+</html>

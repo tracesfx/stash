@@ -27,7 +27,7 @@ Mobile, cloud accounts/sync service, collaboration, always-on recording/replay b
 | Wedge | Method | Behaviour |
 |----|--------|-----------|
 | C1 | **Region snip** (also the tap default) | Screen frozen at keypress (catches video frames / hover states). Dim overlay, drag a rect, release = saved as PNG. `Esc` cancels. **No clipboard step.** Multi-monitor + per-monitor DPI correct. |
-| C2 | **Active window** | Instant save, no overlay. |
+| (removed from wheel) C2 | **Active window** | Instant save, no overlay. |
 | C3 | **Full screen** (current monitor) | Instant save. |
 | C4 | **Stash selection** | App sends Ctrl+C to the foreground app, reads the clipboard (text / image / URL / files), saves it, restores the prior clipboard. |
 | C5 | **Stash clipboard** | Saves current clipboard contents as-is. |

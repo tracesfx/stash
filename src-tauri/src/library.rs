@@ -10,7 +10,6 @@ use image::{ExtendedColorType, ImageEncoder};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::clip::Clip;
 use crate::winutil::{MonitorDesc, SourceInfo};
 
 const SCHEMA: u32 = 1;
@@ -46,6 +45,8 @@ fn method_label(m: &str) -> &str {
         "clipboard" => "Clipboard",
         "note" => "Note",
         "drop" => "Dropped",
+        "record" => "Clip",
+        "board" => "Board",
         o => o,
     }
 }
@@ -158,6 +159,78 @@ pub fn save_image(root: &Path, rgba: &[u8], w: u32, h: u32, meta: ImageMeta) -> 
     Ok(Saved { sidecar, preview: Preview::Image(thumb), meta })
 }
 
+/// Saves a recorded MP4 clip (kind "file"; the first frame is the popup thumbnail).
+pub fn save_video(root: &Path, src: &Path, rec: &crate::record::Recorded, source: &SourceInfo, monitor: &MonitorDesc) -> Result<Saved> {
+    let (thumb, _) = thumb_and_palette(&rec.first, rec.w, rec.h)?;
+    let sidecar = put(
+        root,
+        Item {
+            kind: "file",
+            ext: "mp4",
+            mime: "video/mp4",
+            method: "record",
+            source,
+            original_path: None,
+            extra: json!({
+                "image": { "w": rec.w, "h": rec.h, "monitor": monitor.name, "scale": monitor.scale },
+                "video": { "secs": (rec.secs * 10.0).round() / 10.0 },
+            }),
+        },
+        |p| {
+            if std::fs::rename(src, p).is_err() {
+                std::fs::copy(src, p)?; // different volume
+            }
+            Ok(())
+        },
+    )?;
+    let meta = format!("Clip · {}×{} · {:.0}s{}", rec.w, rec.h, rec.secs, via(source));
+    Ok(Saved { sidecar, preview: Preview::Image(thumb), meta })
+}
+
+/// Saves (or overwrites, when `existing` is a sidecar path) a whiteboard: PNG render + `<id>.board` scene JSON.
+pub fn save_board(root: &Path, existing: Option<&Path>, png: &[u8], scene: &str) -> Result<Saved> {
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).context("board png")?.to_rgb8();
+    let (w, h) = img.dimensions();
+    let (thumb, palette) = thumb_and_palette(img.as_raw(), w, h)?;
+    let source = SourceInfo::default();
+    let sidecar = if let Some(sc) = existing {
+        let v = read_json(sc)?;
+        let name = v["file"]["name"].as_str().context("sidecar has no file name")?.to_string();
+        let content = sc.with_file_name(&name);
+        write_atomic(&content.with_extension("board"), scene.as_bytes())?;
+        write_atomic(&content, png)?;
+        let (bytes, sha) = (std::fs::metadata(&content)?.len(), sha256_file(&content)?);
+        update_sidecar(sc, |v| {
+            v["file"]["bytes"] = json!(bytes);
+            v["file"]["sha256"] = json!(sha);
+            v["image"] = json!({ "w": w, "h": h });
+            v["palette"] = json!(palette);
+            if let Some(o) = v.as_object_mut() {
+                o.remove("ocr"); // re-indexed by the gallery backfill
+            }
+        })?;
+        sc.to_path_buf()
+    } else {
+        put(
+            root,
+            Item {
+                kind: "image",
+                ext: "png",
+                mime: "image/png",
+                method: "board",
+                source: &source,
+                original_path: None,
+                extra: json!({ "image": { "w": w, "h": h }, "palette": palette }),
+            },
+            |p| {
+                write_atomic(&p.with_extension("board"), scene.as_bytes())?;
+                write_atomic(p, png)
+            },
+        )?
+    };
+    Ok(Saved { sidecar, preview: Preview::Image(thumb), meta: format!("Board · {w}×{h}") })
+}
+
 fn is_url(s: &str) -> bool {
     let s = s.trim();
     (s.starts_with("http://") || s.starts_with("https://")) && !s.contains(char::is_whitespace)
@@ -217,25 +290,6 @@ pub fn save_file(root: &Path, src: &Path, method: &str, source: &SourceInfo) -> 
     let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let meta = format!("{} · {name}", method_label(method));
     Ok(Saved { sidecar, preview: Preview::Text(format!("📄 {name}")), meta })
-}
-
-/// Saves clipboard content of any supported kind. Returns the last item saved and how many were saved.
-pub fn save_clip(root: &Path, clip: Clip, method: &'static str, source: &SourceInfo, monitor: MonitorDesc) -> Result<(Saved, usize)> {
-    match clip {
-        Clip::Text(t) => Ok((save_text(root, &t, method, source)?, 1)),
-        Clip::Image { rgba, w, h } => {
-            let meta = ImageMeta { method, source: source.clone(), monitor, rect: [0, 0, w as i32, h as i32] };
-            Ok((save_image(root, &rgba, w, h, meta)?, 1))
-        }
-        Clip::Files(files) => {
-            let mut last = None;
-            for f in &files {
-                last = Some(save_file(root, f, method, source)?);
-            }
-            let n = files.len();
-            Ok((last.context("no files")?, n))
-        }
-    }
 }
 
 /// Popup thumbnail (PNG data URL) and the dominant-colour palette, from one downscale.

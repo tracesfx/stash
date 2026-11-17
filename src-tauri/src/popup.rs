@@ -29,6 +29,7 @@ pub struct PopupData {
     data: String,
     captionable: bool,
     meta: String,
+    show_ms: u32,
 }
 
 /// Shows (or replaces) the popup in the bottom-right corner of the primary monitor.
@@ -77,23 +78,29 @@ pub fn notice(app: &AppHandle, msg: &str) {
 }
 
 /// Logical top-left for a window of (w, h) in the bottom-right of the primary monitor.
-pub fn corner(app: &AppHandle, w: f64, h: f64, bottom_margin: f64) -> (f64, f64) {
+pub fn corner(app: &AppHandle, w: f64, h: f64, margin: f64) -> (f64, f64) {
+    let corner = app.state::<crate::AppState>().cfg().appearance.popup_corner;
     match app.primary_monitor() {
         Ok(Some(m)) => {
             let s = m.scale_factor();
             let (p, sz) = (m.position(), m.size());
-            (p.x as f64 / s + sz.width as f64 / s - w - 16.0, p.y as f64 / s + sz.height as f64 / s - h - bottom_margin)
+            let (left, top) = (p.x as f64 / s, p.y as f64 / s);
+            let (right, bottom) = (left + sz.width as f64 / s, top + sz.height as f64 / s);
+            let x = if corner.ends_with('l') { left + 16.0 } else { right - w - 16.0 };
+            let y = if corner.starts_with('t') { top + 16.0 } else { bottom - h - margin };
+            (x, y)
         }
         _ => (100.0, 100.0),
     }
 }
 
 #[tauri::command]
-pub fn popup_data(state: State<PopupState>) -> Option<PopupData> {
+pub fn popup_data(state: State<PopupState>, app: AppHandle) -> Option<PopupData> {
+    let show_ms = app.state::<crate::AppState>().cfg().appearance.popup_ms;
     state.inner.lock().unwrap().as_ref().map(|p| match &p.preview {
-        Preview::Image(u) => PopupData { kind: "image", data: u.clone(), captionable: p.sidecar.is_some(), meta: p.meta.clone() },
-        Preview::Text(t) => PopupData { kind: "text", data: t.clone(), captionable: p.sidecar.is_some(), meta: p.meta.clone() },
-        Preview::Notice(t) => PopupData { kind: "notice", data: t.clone(), captionable: false, meta: String::new() },
+        Preview::Image(u) => PopupData { kind: "image", data: u.clone(), captionable: p.sidecar.is_some(), meta: p.meta.clone(), show_ms },
+        Preview::Text(t) => PopupData { kind: "text", data: t.clone(), captionable: p.sidecar.is_some(), meta: p.meta.clone(), show_ms },
+        Preview::Notice(t) => PopupData { kind: "notice", data: t.clone(), captionable: false, meta: String::new(), show_ms },
     })
 }
 

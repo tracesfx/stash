@@ -95,3 +95,32 @@ pub fn copy_selection() -> Result<Option<Clip>> {
     restore(prev);
     Ok(got)
 }
+
+/// Saves clipboard-like content into the library. Files are copied one by one; the last one is returned
+/// (the popup shows one preview) together with how many were saved.
+pub fn save(root: &std::path::Path, clip: Clip, method: &'static str, source: &crate::winutil::SourceInfo) -> Result<(Vec<crate::library::Saved>, usize)> {
+    use crate::library;
+    match clip {
+        Clip::Text(t) => Ok((vec![library::save_text(root, &t, method, source)?], 1)),
+        Clip::Image { rgba, w, h } => {
+            let meta = library::ImageMeta {
+                method,
+                source: source.clone(),
+                monitor: crate::winutil::MonitorDesc { name: String::new(), scale: 1.0 },
+                rect: [0, 0, w as i32, h as i32],
+            };
+            Ok((vec![library::save_image(root, &rgba, w, h, meta)?], 1))
+        }
+        Clip::Files(files) => {
+            let mut out = Vec::new();
+            for f in files.iter().filter(|f| f.is_file()) {
+                out.push(library::save_file(root, f, method, source)?);
+            }
+            if out.is_empty() {
+                return Err(anyhow!("no files on the clipboard"));
+            }
+            let n = out.len();
+            Ok((out, n))
+        }
+    }
+}

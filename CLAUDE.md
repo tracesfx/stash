@@ -46,3 +46,14 @@ Tooling gotchas: apostrophes inside Bash heredocs break in this harness — crea
 
 ## Environment (checked 2026-11-05)
 node 24, npm 11, cargo/rustc 1.99, .NET 9, git 2.56. Python not installed.
+
+## Update (video / whiteboard / customization)
+- Wheel now has 5 wedges: Region, Note, Record, Gallery, Settings (window/screen/selection/clipboard/pause/board removed from the wheel; Pause + New whiteboard live in the tray; clip.rs deleted).
+- record.rs: Media Foundation H.264/AAC MP4 from GDI BitBlt, one thread only while recording; hotkey tap stops it. `cargo test record_selftest -- --ignored` smoke-tests it.
+- board.rs + src/board.ts: whiteboard (canvas, scene = `<id>.board` next to the PNG). Videos on boards reference library files via `stash://media/<rel>`. Gallery selection -> New whiteboard (`gallery_new_board`).
+- Config `appearance` (config.rs `Appearance`) drives web CSS vars (theme.ts) and the native wheel/overlay (theme::Style). Edits apply live via `settings_set_appearance`.
+- Gallery: marquee select, card checkboxes, floating selection bar.
+
+## Update (configurable wheel + paste/drop)
+- Wheel wedges are now user-toggleable (Settings > Radial wheel, config `wheel_actions`, live via `settings_set_wheel`). 11 possible actions in fixed canonical order (wheel.rs `ALL_ACTIONS`): Region, Window, Screen, Selection, Clipboard, Note, Record, Whiteboard, Pause, Gallery, Settings; default = Region/Note/Record/Gallery/Settings; min 2. Wedge count is dynamic (`State.acts`). clip.rs is back (selection/clipboard + `clip::save`); Pending carries the foreground `window_rect` for Window capture.
+- Gallery adds content by Ctrl+V (`gallery_paste`, reads native clipboard) and by HTML5 drop (native drag-drop handler disabled on the gallery window): files -> `gallery_import_data` (raw bytes, `x-name` header), text/URLs -> `gallery_import_text`. Untested by simulated input per the testing caution; try by hand.

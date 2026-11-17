@@ -9,6 +9,7 @@ use tauri_plugin_opener::OpenerExt;
 use crate::AppState;
 
 /// Managed handle so other code (the wheel) can keep the tray checkbox in sync.
+#[allow(dead_code)]
 pub struct PauseItem(pub CheckMenuItem<tauri::Wry>);
 
 /// Status line at the top of the tray menu (shows the current hotkey).
@@ -39,6 +40,7 @@ fn set_tray_icon(app: &AppHandle, name: &str) {
     }
 }
 
+#[allow(dead_code)]
 pub fn sync_pause(app: &AppHandle, paused: bool) {
     set_tray_icon(app, if paused { "paused" } else { "normal" });
     if let Some(i) = app.try_state::<PauseItem>() {
@@ -57,13 +59,14 @@ pub fn build(app: &AppHandle, hotkey_ok: bool) -> tauri::Result<()> {
     app.manage(StatusItem(status.clone()));
     let gallery = MenuItem::with_id(app, "gallery", "Open gallery", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+    let board = MenuItem::with_id(app, "board", "New whiteboard", true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "Open library folder", true, None::<&str>)?;
     let pause = CheckMenuItem::with_id(app, "pause", "Pause capture", true, false, None::<&str>)?;
     app.manage(PauseItem(pause.clone()));
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&status, &sep1, &gallery, &folder, &settings, &pause, &sep2, &quit])?;
+    let menu = Menu::with_items(app, &[&status, &sep1, &gallery, &board, &folder, &settings, &pause, &sep2, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip(format!("Stash — {status_text}"))
@@ -77,6 +80,7 @@ pub fn build(app: &AppHandle, hotkey_ok: bool) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "gallery" => crate::gallery::open(app),
             "settings" => crate::settings::open(app),
+            "board" => crate::board::open(app, None),
             "folder" => {
                 let path = app.state::<AppState>().cfg().library_path;
                 if let Err(e) = app.opener().open_path(path.to_string_lossy(), None::<&str>) {

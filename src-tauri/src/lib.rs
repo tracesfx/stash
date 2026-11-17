@@ -1,4 +1,6 @@
+mod board;
 mod clip;
+mod record;
 mod config;
 mod gfx;
 mod settings;
@@ -61,7 +63,9 @@ pub fn run() {
         // A second launch just exits; the running instance keeps going.
         .plugin(tauri_plugin_single_instance::init(|_app, args, _cwd| {
             tracing::info!("second instance launched; opening gallery");
-            if args.iter().any(|a| a == "--settings") {
+            if args.iter().any(|a| a == "--board") {
+                board::open(_app, None);
+            } else if args.iter().any(|a| a == "--settings") {
                 settings::open(_app);
             } else {
                 gallery::open(_app);
@@ -74,17 +78,19 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("stash", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             let path = request.uri().path().to_string();
+            let range = request.headers().get("range").and_then(|v| v.to_str().ok()).map(String::from);
             std::thread::spawn(move || {
-                let (status, mime, body) = gallery::serve(&app, &path);
-                responder.respond(
-                    tauri::http::Response::builder()
-                        .status(status)
-                        .header("Content-Type", mime)
-                        .header("Access-Control-Allow-Origin", "*")
-                        .header("Cache-Control", "max-age=3600")
-                        .body(body)
-                        .unwrap(),
-                );
+                let s = gallery::serve(&app, &path, range.as_deref());
+                let mut b = tauri::http::Response::builder()
+                    .status(s.status)
+                    .header("Content-Type", s.mime)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Cache-Control", "max-age=3600");
+                if let Some(cr) = s.content_range {
+                    b = b.header("Content-Range", cr);
+                }
+                responder.respond(b.body(s.body).unwrap());
             });
         })
         .invoke_handler(tauri::generate_handler![
@@ -104,11 +110,23 @@ pub fn run() {
             gallery::gallery_backfill,
             gallery::gallery_export,
             gallery::gallery_open_path,
+            gallery::gallery_edit_board,
+            board::board_init,
+            board::board_save,
+            board::board_close,
+            board::board_read_image,
+            board::board_add_video,
+            gallery::gallery_new_board,
             settings::settings_get,
             settings::settings_save,
             settings::hotkey_suspend,
             theme::theme_info,
             settings::settings_set_glass,
+            settings::settings_set_appearance,
+            settings::settings_set_wheel,
+            gallery::gallery_paste,
+            gallery::gallery_import_data,
+            gallery::gallery_import_text,
             settings::settings_set_theme,
             note::note_save,
             note::note_close
@@ -116,6 +134,7 @@ pub fn run() {
         .setup(move |app| {
             use tauri::Manager;
             app.manage(popup::PopupState::default());
+            app.manage(board::BoardState::default());
             app.manage(snip::SnipState::default());
             app.manage(note::NoteState::default());
             app.manage(gallery::GalleryState::default());

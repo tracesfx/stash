@@ -17,6 +17,7 @@ interface PopupData {
   data: string;
   captionable: boolean;
   meta: string;
+  show_ms: number;
 }
 
 let timer: number | undefined;
@@ -50,7 +51,7 @@ invoke<PopupData | null>("popup_data").then((d) => {
     document.body.classList.add(d.kind);
     txt.textContent = d.data;
   }
-  if (d.kind === "notice") showMs = NOTICE_MS;
+  showMs = d.kind === "notice" ? NOTICE_MS : d.show_ms;
   arm(showMs);
 });
 

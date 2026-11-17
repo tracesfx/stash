@@ -1,6 +1,5 @@
 import "./theme";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
 
@@ -9,7 +8,7 @@ interface Item {
   source_title: string; process: string; url: string | null; ext: string; name: string; bytes: number;
   mime: string; w: number | null; h: number | null; original_path: string | null;
   text: string | null; path: string; icon: string;
-  palette: string[]; board: string | null; ocr: string | null;
+  palette: string[]; board: string | null; ocr: string | null; scene: boolean;
 }
 
 const BATCH = 120;
@@ -22,6 +21,7 @@ const SVG = (d: string) => `<svg class="ico" viewBox="0 0 16 16">${d}</svg>`;
 const ICON = {
   copy: SVG('<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3 10.5V4.5A1.5 1.5 0 0 1 4.5 3h6"/>'),
   trash: SVG('<path d="M2.5 4.5h11M6 4.5V3h4v1.5M4 4.5l.6 8.5h6.8l.6-8.5"/>'),
+  edit: SVG('<path d="M3 13l1-3.5L11.5 2l2.5 2.5L6.5 12 3 13z"/>'),
   open: SVG('<path d="M7 3.5H4A1.5 1.5 0 0 0 2.5 5v7A1.5 1.5 0 0 0 4 13.5h7a1.5 1.5 0 0 0 1.5-1.5V9M9.5 2.5h4v4M13.5 2.5l-6 6"/>'),
 };
 
@@ -40,6 +40,13 @@ let shuffleJustStarted = false;
 const thumb = (it: Item) => `http://stash.localhost/thumb/${it.id}`;
 const full = (it: Item) => `http://stash.localhost/full/${it.id}`;
 const isImg = (it: Item) => it.kind === "image";
+const VIDEO = new Set(["mp4", "m4v", "webm", "mov"]);
+const AUDIO = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac"]);
+const ext = (it: Item) => it.ext.toLowerCase();
+const isVideo = (it: Item) => it.kind !== "image" && VIDEO.has(ext(it));
+const isAudio = (it: Item) => it.kind !== "image" && AUDIO.has(ext(it));
+const isPdf = (it: Item) => ext(it) === "pdf";
+const isTextFile = (it: Item) => it.kind === "file" && it.text != null;
 const canCopy = (it: Item) => it.ext.toLowerCase() === "png" || it.kind === "text" || it.kind === "link";
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] {
@@ -182,6 +189,16 @@ function card(it: Item): HTMLElement {
   const c = el("div", "card" + (selected.has(it.id) ? " sel" : ""));
   c.dataset.id = it.id;
   c.draggable = true;
+  const chk = el("button", "chk");
+  chk.title = "Select";
+  chk.addEventListener("mousedown", (e) => e.stopPropagation());
+  chk.addEventListener("click", (e) => {
+    e.stopPropagation();
+    selected.has(it.id) ? selected.delete(it.id) : selected.add(it.id);
+    anchor = shown.findIndex((i) => i.id === it.id);
+    refreshSel();
+  });
+  c.append(chk);
   if (isImg(it)) {
     const img = el("img");
     img.loading = "lazy";
@@ -190,8 +207,18 @@ function card(it: Item): HTMLElement {
     img.onload = () => img.classList.add("ok");
     img.src = thumb(it);
     c.append(img);
-  } else if (it.kind === "text" || it.kind === "link") {
-    c.append(el("div", "t" + (it.kind === "link" ? " link" : ""), it.text ?? ""));
+  } else if (isVideo(it)) {
+    const v = el("video");
+    v.muted = true; v.loop = true; v.preload = "metadata"; v.draggable = false;
+    if (it.w && it.h) v.style.aspectRatio = `${it.w} / ${it.h}`;
+    v.src = full(it) + "#t=0.1";
+    c.addEventListener("mouseenter", () => { v.play().catch(() => {}); });
+    c.addEventListener("mouseleave", () => { v.pause(); v.currentTime = 0.1; });
+    c.append(v, el("span", "vbadge", "▶"));
+  } else if (it.kind === "text" || it.kind === "link" || isTextFile(it)) {
+    const t = el("div", "t" + (it.kind === "link" ? " link" : ""), it.text ?? "");
+    if (isTextFile(it)) { t.classList.add("code"); t.append(el("span", "badge", it.ext)); }
+    c.append(t);
   } else {
     const fl = el("div", "f");
     fl.append(el("span", "badge", it.ext || "file"), el("span", "", it.original_path?.split(/[\\/]/).pop() ?? it.name));
@@ -204,6 +231,7 @@ function card(it: Item): HTMLElement {
   }
   if (it.caption) c.append(el("div", "cap", it.caption));
   const acts = el("div", "acts");
+  if (it.scene) acts.append(actBtn(ICON.edit, "Edit whiteboard", () => invoke("gallery_edit_board", { id: it.id })));
   if (canCopy(it)) acts.append(actBtn(ICON.copy, "Copy", () => copyItem(it)));
   if (it.url) acts.append(actBtn(ICON.open, "Open source page", () => invoke("gallery_open_url", { url: it.url })));
   acts.append(actBtn(ICON.trash, "Move to trash", () => trash([it.id]), "d"));
@@ -225,7 +253,7 @@ function render() {
       empty.append(el("h2", "", "Nothing matches"), el("div", "", "Try clearing a filter or the search."));
     } else {
       const hint = el("div");
-      hint.append("Tap ", Object.assign(el("kbd"), { textContent: "Ctrl" }), " ", Object.assign(el("kbd"), { textContent: "Alt" }), " ", Object.assign(el("kbd"), { textContent: "S" }), " to snip, hold it for the wheel, or drop files here.");
+      hint.append("Tap ", Object.assign(el("kbd"), { textContent: "Ctrl" }), " ", Object.assign(el("kbd"), { textContent: "Alt" }), " ", Object.assign(el("kbd"), { textContent: "S" }), " to snip, hold it for the wheel, or drop / paste (Ctrl+V) anything here.");
       empty.append(el("h2", "", "Your library is empty"), hint);
     }
   }
@@ -239,7 +267,69 @@ function more() {
 }
 new IntersectionObserver((e) => { if (e[0].isIntersecting && rendered < shown.length) more(); }, { root: wrap, rootMargin: "800px" }).observe($("sentinel"));
 
+/** Lightweight selection refresh (marquee drag): classes + action bar, no detail panel rebuild. */
+function markSel() {
+  grid.querySelectorAll<HTMLElement>(".card").forEach((c) => c.classList.toggle("sel", selected.has(c.dataset.id!)));
+  updateSelBar();
+}
+
+const selbar = el("div");
+selbar.id = "selbar";
+document.body.append(selbar);
+function updateSelBar() {
+  document.body.classList.toggle("multi", selected.size > 0);
+  selbar.replaceChildren();
+  selbar.classList.toggle("on", selected.size > 0);
+  if (!selected.size) return;
+  const btn = (label: string, fn: () => void, cls = "") => { const b = el("button", "btn " + cls, label); b.onclick = fn; return b; };
+  const ids = () => [...selected];
+  selbar.append(
+    el("span", "n", `${selected.size} selected`),
+    btn("Select all", () => { selected = new Set(shown.map((i) => i.id)); refreshSel(); }),
+    btn("New whiteboard", () => invoke("gallery_new_board", { ids: ids() }).catch((e) => flash(String(e))), "pri"),
+    btn("Export…", () => exportItems(ids())),
+    btn("Trash", () => trash(ids()), "danger"),
+    btn("✕", () => { selected.clear(); refreshSel(); }),
+  );
+}
+
+// Rubber-band selection: drag on empty space; Ctrl/Shift adds to the current selection.
+const marq = el("div");
+marq.id = "marq";
+document.body.append(marq);
+wrap.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0 || (e.target as HTMLElement).closest(".card")) return;
+  if (e.clientX >= wrap.getBoundingClientRect().left + wrap.clientWidth) return; // scrollbar
+  const [x0, y0] = [e.clientX, e.clientY];
+  const base = e.ctrlKey || e.shiftKey ? new Set(selected) : new Set<string>();
+  let active = false;
+  const move = (m: PointerEvent) => {
+    if (!active && Math.hypot(m.clientX - x0, m.clientY - y0) < 5) return;
+    active = true;
+    const [l, t, r, b] = [Math.min(x0, m.clientX), Math.min(y0, m.clientY), Math.max(x0, m.clientX), Math.max(y0, m.clientY)];
+    Object.assign(marq.style, { display: "block", left: l + "px", top: t + "px", width: r - l + "px", height: b - t + "px" });
+    const hits = new Set(base);
+    grid.querySelectorAll<HTMLElement>(".card").forEach((c) => {
+      const q = c.getBoundingClientRect();
+      if (q.left < r && q.right > l && q.top < b && q.bottom > t) hits.add(c.dataset.id!);
+    });
+    selected = hits;
+    markSel();
+    const wr = wrap.getBoundingClientRect();
+    if (m.clientY > wr.bottom - 30) wrap.scrollTop += 18; else if (m.clientY < wr.top + 30) wrap.scrollTop -= 18;
+  };
+  const up = () => {
+    window.removeEventListener("pointermove", move);
+    marq.style.display = "none";
+    if (!active && !base.size) selected.clear();
+    refreshSel();
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up, { once: true });
+});
+
 function refreshSel() {
+  updateSelBar();
   grid.querySelectorAll<HTMLElement>(".card").forEach((c) => c.classList.toggle("sel", selected.has(c.dataset.id!)));
   showDetail();
 }
@@ -294,6 +384,28 @@ function openViewer(i: number) {
     const img = el("img");
     img.src = it.ext.toLowerCase() === "png" || it.ext.toLowerCase() === "jpg" ? full(it) : thumb(it);
     viewer.append(img);
+  } else if (isVideo(it)) {
+    const v = el("video");
+    v.src = full(it); v.controls = true; v.autoplay = true; v.loop = true;
+    v.addEventListener("click", (e) => e.stopPropagation());
+    viewer.append(v);
+  } else if (isAudio(it)) {
+    const box = el("div", "vt aud", it.original_path?.split(/[\\/]/).pop() ?? it.name);
+    const a = el("audio");
+    a.src = full(it); a.controls = true; a.autoplay = true;
+    a.addEventListener("click", (e) => e.stopPropagation());
+    box.append(a);
+    viewer.append(box);
+  } else if (isPdf(it)) {
+    const f = el("iframe");
+    f.src = full(it);
+    f.addEventListener("click", (e) => e.stopPropagation());
+    viewer.append(f);
+  } else if (isTextFile(it)) {
+    const pre = el("div", "vt code", "Loading…");
+    pre.addEventListener("click", (e) => e.stopPropagation());
+    viewer.append(pre);
+    fetch(full(it)).then((r) => r.text()).then((t) => { if (viewIdx === i) pre.textContent = t.length > 300000 ? t.slice(0, 300000) + "\n\n… (truncated)" : t; }).catch(() => (pre.textContent = it.text ?? ""));
   } else {
     viewer.append(el("div", "vt", it.text ?? it.name));
   }
@@ -521,17 +633,47 @@ window.addEventListener("keydown", (e) => {
   else if (!inField && e.ctrlKey && e.key.toLowerCase() === "a") { e.preventDefault(); selected = new Set(shown.map((i) => i.id)); refreshSel(); }
 });
 
-// Files dropped from Explorer are imported; ignore our own drag-out coming back in.
-getCurrentWebview().onDragDropEvent(async (ev) => {
-  const p = ev.payload;
-  if (p.type === "enter" || p.type === "over") dropEl.classList.toggle("on", !dragging);
-  else if (p.type === "leave") dropEl.classList.remove("on");
-  else if (p.type === "drop") {
-    dropEl.classList.remove("on");
-    if (dragging || !p.paths.length) return;
-    const n = await invoke<number>("gallery_import", { paths: p.paths });
-    flash(`Added ${n} file${n === 1 ? "" : "s"}`);
+// ---------- add content: drop and paste ----------
+// Drops are handled as HTML5 events (the native handler only understands files): files from Explorer or a
+// browser, images, text and links. Our own drag-out coming back in is ignored.
+const hasPayload = (dt: DataTransfer | null) => !!dt && ["Files", "text/plain", "text/uri-list", "text/html"].some((t) => dt.types.includes(t));
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => { if (dragging || !hasPayload(e.dataTransfer)) return; e.preventDefault(); dragDepth++; dropEl.classList.add("on"); });
+window.addEventListener("dragover", (e) => { if (dragging || !hasPayload(e.dataTransfer)) return; e.preventDefault(); if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; });
+window.addEventListener("dragleave", () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) dropEl.classList.remove("on"); });
+window.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  dropEl.classList.remove("on");
+  const dt = e.dataTransfer;
+  if (dragging || !dt) return;
+  let n = 0;
+  try {
+    if (dt.files.length) {
+      for (const f of Array.from(dt.files)) {
+        await invoke("gallery_import_data", new Uint8Array(await f.arrayBuffer()), { headers: { "x-name": encodeURIComponent(f.name || "dropped") } });
+        n++;
+      }
+    } else {
+      const text = (dt.getData("text/uri-list") || dt.getData("text/plain")).split(/\r?\n/).find((l) => l.trim() && !l.startsWith("#"))?.trim() ?? dt.getData("text/plain").trim();
+      if (text) { await invoke("gallery_import_text", { text }); n++; }
+    }
+  } catch (err) {
+    flash(String(err));
+    return;
+  }
+  if (n) { flash(`Added ${n} item${n === 1 ? "" : "s"}`); await load(true); }
+});
+
+// Ctrl+V pastes the clipboard (files, an image, text or a link) into the library.
+window.addEventListener("keydown", async (e) => {
+  if (!(e.ctrlKey && e.key.toLowerCase() === "v") || (e.target as HTMLElement).tagName === "INPUT" || viewer.classList.contains("on")) return;
+  e.preventDefault();
+  try {
+    flash(await invoke<string>("gallery_paste"));
     await load(true);
+  } catch (err) {
+    flash(String(err));
   }
 });
 

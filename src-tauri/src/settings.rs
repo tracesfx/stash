@@ -69,6 +69,10 @@ fn apply(app: &AppHandle, new: Config) -> Result<Config> {
     let mut new = new;
     new.theme = old.theme.clone(); // theme + glass colours are changed live via their own commands
     new.glass = old.glass.clone();
+    new.appearance = old.appearance.clone(); // appearance has its own live command
+    new.wheel_actions = old.wheel_actions.clone(); // wheel wedges have their own live command
+    new.rec_fps = new.rec_fps.clamp(5, 60);
+    new.rec_max_secs = new.rec_max_secs.min(3600);
     new.hold_ms = new.hold_ms.clamp(80, 1000);
     std::fs::create_dir_all(&new.library_path).with_context(|| format!("can't use folder {}", new.library_path.display()))?;
 
@@ -139,6 +143,21 @@ pub fn settings_set_glass(colors: Vec<String>, app: AppHandle) -> Result<(), Str
     Ok(())
 }
 
+/// Look & feel knobs (glass, wheel, popup, fonts); applies immediately.
+#[tauri::command]
+pub fn settings_set_appearance(appearance: crate::config::Appearance, app: AppHandle) -> Result<crate::config::Appearance, String> {
+    let mut a = appearance;
+    a.clamp();
+    let st = app.state::<AppState>();
+    let mut cfg = st.cfg();
+    cfg.appearance = a.clone();
+    cfg.save().map_err(|e| format!("{e:#}"))?;
+    *st.config.write().unwrap() = cfg;
+    let ap = app.clone();
+    let _ = app.run_on_main_thread(move || crate::theme::apply(&ap));
+    Ok(a)
+}
+
 /// While the settings window records a new shortcut, the live hotkey must not fire.
 #[tauri::command]
 pub fn hotkey_suspend(suspend: bool, app: AppHandle) {
@@ -149,4 +168,19 @@ pub fn hotkey_suspend(suspend: bool, app: AppHandle) {
     } else {
         let _ = gs.register(sc);
     }
+}
+
+/// Which wedges the radial wheel shows; applies immediately. At least two must stay enabled.
+#[tauri::command]
+pub fn settings_set_wheel(actions: Vec<String>, app: AppHandle) -> Result<Vec<String>, String> {
+    let valid: Vec<String> = crate::wheel::ALL_ACTIONS.iter().filter(|a| actions.iter().any(|i| i == a.id())).map(|a| a.id().to_string()).collect();
+    if valid.len() < 2 {
+        return Err("Keep at least two actions on the wheel.".into());
+    }
+    let st = app.state::<AppState>();
+    let mut cfg = st.cfg();
+    cfg.wheel_actions = valid.clone();
+    cfg.save().map_err(|e| format!("{e:#}"))?;
+    *st.config.write().unwrap() = cfg;
+    Ok(valid)
 }

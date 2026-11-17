@@ -18,7 +18,7 @@
       #rail { overflow-y: auto; padding: 4px 8px 16px 12px; }
       .rh { margin: 14px 8px 6px; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
       .ri { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 6px 10px; border: 0; border-radius: var(--r-s); background: transparent; color: var(--dim); text-align: left; cursor: pointer; transition: background var(--dur) var(--ease), color var(--dur); }
-      .ri:hover { background: var(--surface); color: var(--txt); }
+      .ri:hover { background: color-mix(in srgb, var(--hover) 20%, var(--surface)); color: var(--txt); }
       .ri.on { background: var(--surface-2); color: var(--txt); box-shadow: inset 2px 0 0 var(--accent); }
       .ri span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .ri .n { color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
@@ -28,7 +28,7 @@
       #grid { column-width: 220px; column-gap: 14px; }
       .card { position: relative; break-inside: avoid; margin: 0 0 14px; border-radius: var(--r-m); overflow: hidden; cursor: pointer; background: var(--surface-solid); border: 1px solid var(--line); box-shadow: 0 1px 2px rgba(0,0,0,.18), var(--rim); transition: transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease), border-color var(--dur); animation: pop 220ms var(--ease) both; }
       @keyframes pop { from { opacity: 0; transform: translateY(6px) scale(.985); } to { opacity: 1; transform: none; } }
-      .card:hover { transform: translateY(-2px); box-shadow: var(--shadow); }
+      .card:hover { transform: translateY(-2px); box-shadow: var(--shadow), 0 0 0 2px color-mix(in srgb, var(--hover) 55%, transparent); }
       .card.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), var(--shadow); }
       .ri.on { background: var(--surface-2); }
       .card img { display: block; width: 100%; height: auto; opacity: 0; transition: opacity 240ms var(--ease); background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%) 0 0 / 200% 100%; animation: shimmer 1.2s linear infinite; }
@@ -67,6 +67,24 @@
       @keyframes fade { from { opacity: 0; } }
       #viewer img { max-width: 92vw; max-height: 84vh; border-radius: var(--r-m); box-shadow: var(--shadow); }
       #viewer .vt { max-width: 70ch; max-height: 80vh; overflow: auto; padding: 24px; font-size: 16px; line-height: 1.6; white-space: pre-wrap; background: var(--surface-solid); border-radius: var(--r-l); }
+      #viewer video { max-width: 92vw; max-height: 84vh; border-radius: var(--r-m); box-shadow: var(--shadow); background: #000; }
+      #viewer iframe { width: min(92vw, 1000px); height: 88vh; border: 0; border-radius: var(--r-m); background: #fff; }
+      #viewer .vt.code { font: 12.5px/1.55 ui-monospace, Consolas, "Cascadia Mono", monospace; max-width: min(92vw, 110ch); width: 100%; }
+      #viewer .vt.aud { display: flex; flex-direction: column; gap: 16px; align-items: center; }
+      .card video { width: 100%; display: block; border-radius: inherit; background: #000; }
+      .card .chk { position: absolute; top: 8px; left: 8px; z-index: 3; width: 22px; height: 22px; border-radius: 50%; padding: 0; border: 2px solid rgba(255,255,255,.9); background: rgba(0,0,0,.35); cursor: pointer; opacity: 0; transition: opacity var(--dur), background var(--dur); backdrop-filter: blur(6px); }
+      .card:hover .chk, body.multi .chk { opacity: 1; }
+      .card.sel .chk { background: var(--hover); border-color: var(--hover); opacity: 1; }
+      .card.sel .chk::after { content: ""; position: absolute; left: 6px; top: 2px; width: 5px; height: 10px; border: solid var(--on-hover); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+      #selbar { position: fixed; bottom: 22px; left: 50%; transform: translate(-50%, 16px); display: flex; gap: 8px; align-items: center; padding: 8px 10px 8px 16px; border-radius: 999px; background: var(--surface-solid); border: 1px solid var(--line); box-shadow: var(--shadow); backdrop-filter: var(--blur); opacity: 0; pointer-events: none; transition: opacity 160ms var(--ease), transform 160ms var(--ease); z-index: 15; }
+      #selbar.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+      #selbar .n { font-weight: 600; margin-right: 6px; white-space: nowrap; }
+      #selbar .btn { border-radius: 999px; padding: 6px 12px; white-space: nowrap; }
+      #marq { position: fixed; display: none; z-index: 14; pointer-events: none; border: 1px solid var(--hover); background: color-mix(in srgb, var(--hover) 18%, transparent); border-radius: 4px; }
+      .card .vbadge { position: absolute; top: 8px; right: 8px; font-size: 10px; padding: 3px 7px; border-radius: 999px; background: rgba(0,0,0,.6); color: #fff; pointer-events: none; transition: opacity var(--dur); }
+      .card:hover .vbadge { opacity: 0; }
+      .card .t.code { font: 11.5px/1.5 ui-monospace, Consolas, monospace; white-space: pre-wrap; overflow: hidden; max-height: 180px; position: relative; }
+      .card .t.code .badge { position: absolute; top: 6px; right: 6px; }
       #viewer .vc { position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%); padding: 8px 16px; border-radius: 999px; background: rgba(30,30,38,.85); color: #eee; max-width: 70vw; text-align: center; }
       #viewer .vn { position: absolute; top: 50%; width: 44px; height: 44px; border-radius: 50%; border: 0; background: rgba(40,40,50,.8); color: #fff; font-size: 20px; cursor: pointer; }
       #viewer .vn:hover { background: rgba(70,70,86,.95); }
@@ -119,7 +137,7 @@
     </div>
     <div id="viewer"></div>
     <div id="toast"></div>
-    <div id="drop">Drop files to add them to Stash</div>
+    <div id="drop">Drop files, images, text or links to add them to Stash</div>
     <script type="module" src="/src/gallery.ts"></script>
   </body>
 </html>

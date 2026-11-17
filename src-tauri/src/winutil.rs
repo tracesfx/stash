@@ -30,6 +30,7 @@ pub struct SourceInfo {
 pub struct Foreground {
     pub source: SourceInfo,
     pub hwnd: isize,
+    #[allow(dead_code)]
     pub rect: Option<RECT>,
 }
 

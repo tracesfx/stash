@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 use crate::wheel::{self, Action};
 use crate::winutil::{self, Frame, SourceInfo};
-use crate::{gallery, clip, library, note, overlay, popup, tray, uia, AppState};
+use crate::{clip, gallery, library, note, overlay, popup, uia, AppState};
 
 /// The frozen desktop frame, grabbed on a background thread at key-down and shared (read-only) by the wheel
 /// (for the glass backdrop) and the capture that follows.
@@ -44,8 +44,8 @@ impl FrameCell {
 struct Pending {
     started: Instant,
     source: SourceInfo,
-    window_rect: Option<RECT>,
     cursor: POINT,
+    window_rect: Option<RECT>,
     frame: FrameCell,
     url: JoinHandle<Option<String>>,
 }
@@ -94,6 +94,11 @@ fn set_idle(app: &AppHandle) {
 
 /// Hotkey down.
 pub fn begin(app: &AppHandle) {
+    // While a clip is recording, the hotkey just stops it.
+    if crate::record::stop() {
+        tracing::info!("recording stop requested via hotkey");
+        return;
+    }
     let (hold_ms, capture_url) = {
         let c = app.state::<AppState>().cfg();
         (c.hold_ms, c.capture_url)
@@ -113,12 +118,12 @@ pub fn begin(app: &AppHandle) {
         unsafe {
             let _ = GetCursorPos(&mut cursor);
         }
-        let (hwnd, process) = (fg.hwnd, fg.source.process.clone());
+        let (hwnd, process, window_rect) = (fg.hwnd, fg.source.process.clone(), fg.rect);
         s.pending = Some(Pending {
             started: Instant::now(),
             source: fg.source,
-            window_rect: fg.rect,
             cursor,
+            window_rect,
             frame: FrameCell::spawn(),
             url: std::thread::spawn(move || if capture_url { uia::browser_url(hwnd, &process) } else { None }),
         });
@@ -144,7 +149,7 @@ pub fn begin(app: &AppHandle) {
         }
         let scale = winutil::monitor_at(cursor.x, cursor.y).scale;
         let frame = pending.as_ref().and_then(|p| p.frame.wait().ok());
-        let choice = wheel::run(cursor, scale, release, crate::theme::style(&app), frame);
+        let choice = wheel::run(cursor, scale, release, crate::theme::style(&app), frame, wheel::enabled(&app.state::<AppState>().cfg().wheel_actions));
         tracing::info!("wheel choice: {choice:?}");
         if let (Some(action), Some(p)) = (choice, pending) {
             perform(&app, action, p);
@@ -182,20 +187,36 @@ pub fn finish(app: &AppHandle) {
 fn perform(app: &AppHandle, action: Action, p: Pending) {
     let r = match action {
         Action::Snip => run_snip(app, p),
-        Action::Window => run_rect(app, p, "window"),
-        Action::Screen => run_rect(app, p, "screen"),
-        Action::Selection => run_clip(app, p, true),
-        Action::Clipboard => run_clip(app, p, false),
         Action::Note => {
             note::open(app, with_url(p.url, p.source));
             Ok(())
         }
-        Action::Settings => {
-            crate::settings::open(app);
+        Action::Record => run_record(app, p),
+        Action::Window => match p.window_rect {
+            Some(rect) => p.frame.wait().and_then(|f| save_crop(app, f, rect, with_url(p.url, p.source), "window")),
+            None => Err(anyhow!("no foreground window")),
+        },
+        Action::Screen => {
+            let rect = winutil::monitor_rect_at(p.cursor.x, p.cursor.y);
+            p.frame.wait().and_then(|f| save_crop(app, f, rect, with_url(p.url, p.source), "screen"))
+        }
+        Action::Selection => run_clip(app, true, with_url(p.url, p.source)),
+        Action::Clipboard => run_clip(app, false, with_url(p.url, p.source)),
+        Action::Board => {
+            crate::board::open(app, None);
             Ok(())
         }
         Action::Pause => {
-            toggle_pause(app);
+            let st = app.state::<AppState>();
+            let now = !st.paused.load(Ordering::Relaxed);
+            st.paused.store(now, Ordering::Relaxed);
+            crate::tray::sync_pause(app, now);
+            tracing::info!("paused = {now} (wheel)");
+            popup::notice(app, if now { "Capture paused" } else { "Capture resumed" });
+            Ok(())
+        }
+        Action::Settings => {
+            crate::settings::open(app);
             Ok(())
         }
         Action::Gallery => {
@@ -207,14 +228,6 @@ fn perform(app: &AppHandle, action: Action, p: Pending) {
         tracing::error!("{action:?} failed: {e:#}");
         popup::notice(app, "Capture failed — see log");
     }
-}
-
-fn toggle_pause(app: &AppHandle) {
-    let st = app.state::<AppState>();
-    let now = !st.paused.load(Ordering::Relaxed);
-    st.paused.store(now, Ordering::Relaxed);
-    tray::sync_pause(app, now);
-    tracing::info!("paused = {now} (via wheel)");
 }
 
 fn library_root(app: &AppHandle) -> std::path::PathBuf {
@@ -264,30 +277,36 @@ fn run_snip(app: &AppHandle, p: Pending) -> Result<()> {
     save_crop(app, frame, rect, with_url(p.url, p.source), "snip")
 }
 
-/// Active window / full screen (monitor under the cursor): instant, no overlay.
-fn run_rect(app: &AppHandle, p: Pending, method: &'static str) -> Result<()> {
+/// Choose a region, then record it until the hotkey is pressed again.
+fn run_record(app: &AppHandle, p: Pending) -> Result<()> {
     let frame = p.frame.wait()?;
-    let rect = if method == "window" {
-        p.window_rect.ok_or_else(|| anyhow!("no foreground window"))?
-    } else {
-        winutil::monitor_rect_at(p.cursor.x, p.cursor.y)
-    };
-    save_crop(app, frame, rect, with_url(p.url, p.source), method)
-}
-
-/// Stash selection (sends Ctrl+C first) or the current clipboard.
-fn run_clip(app: &AppHandle, p: Pending, copy_first: bool) -> Result<()> {
-    let method = if copy_first { "selection" } else { "clipboard" };
-    let source = with_url(p.url, p.source);
-    let clip = if copy_first { clip::copy_selection()? } else { clip::read() };
-    let Some(clip) = clip else {
-        popup::notice(app, if copy_first { "Nothing selected" } else { "Clipboard is empty" });
+    let monitor = winutil::monitor_at(p.cursor.x, p.cursor.y);
+    let Some(rect) = overlay::select_region(&frame, crate::theme::style(app), monitor.scale) else {
+        tracing::info!("record cancelled");
         return Ok(());
     };
-    let monitor = winutil::monitor_at(p.cursor.x, p.cursor.y);
-    let (saved, n) = library::save_clip(&library_root(app), clip, method, &source, monitor)?;
-    tracing::info!("saved {method} ({n} item(s))");
-    crate::ocr::spawn(app, saved.sidecar.clone());
-    popup::show(app, Some(saved.sidecar), saved.preview, saved.meta);
+    drop(frame);
+    crate::record::start(app, rect, with_url(p.url, p.source), monitor);
+    Ok(())
+}
+
+
+/// Stash the foreground app's selection (`selection`) or the current clipboard.
+fn run_clip(app: &AppHandle, selection: bool, source: SourceInfo) -> Result<()> {
+    let (got, method) = if selection { (clip::copy_selection()?, "selection") } else { (clip::read(), "clipboard") };
+    let Some(got) = got else {
+        popup::notice(app, if selection { "Nothing selected" } else { "Clipboard is empty" });
+        return Ok(());
+    };
+    let (saved, n) = clip::save(&library_root(app), got, method, &source)?;
+    for s in &saved {
+        if !matches!(s.preview, library::Preview::Text(_)) {
+            crate::ocr::spawn(app, s.sidecar.clone());
+        }
+    }
+    if let Some(last) = saved.into_iter().last() {
+        let meta = if n > 1 { format!("{} files · {}", n, last.meta) } else { last.meta };
+        popup::show(app, Some(last.sidecar), last.preview, meta);
+    }
     Ok(())
 }

@@ -23,6 +23,16 @@ pub struct Style {
     pub accent: [u8; 3],
     /// Liquid Glass gradient stops.
     pub glass: [[u8; 3]; 3],
+    /// Hover/selection colour (accent unless overridden).
+    pub hover: [u8; 3],
+    pub translucency: f32, // 0..1
+    pub blur: u8,
+    pub saturation: f32, // 1.0 = unchanged
+    pub tint: f32,       // 0..1
+    pub wheel_size: f32, // 1.0 = 100%
+    pub wheel_hole: f32,
+    pub wheel_gap: f32,
+    pub wheel_opacity: f32,
 }
 
 pub const DEFAULT_GLASS: [&str; 3] = ["#5a78ff", "#be5aff", "#3cdcc8"];
@@ -87,7 +97,22 @@ fn glass_colors(cfg: &Config) -> [[u8; 3]; 3] {
 }
 
 pub fn style_for(cfg: &Config) -> Style {
-    Style { theme: resolve(&cfg.theme), accent: accent(), glass: glass_colors(cfg) }
+    let a = &cfg.appearance;
+    let acc = accent();
+    Style {
+        theme: resolve(&cfg.theme),
+        accent: acc,
+        glass: glass_colors(cfg),
+        hover: parse_hex(&a.hover_color).unwrap_or(acc),
+        translucency: a.glass_translucency as f32 / 100.0,
+        blur: a.glass_blur,
+        saturation: a.glass_saturation as f32 / 100.0,
+        tint: a.glass_tint as f32 / 50.0, // 50 = the original look
+        wheel_size: a.wheel_size as f32 / 100.0,
+        wheel_hole: a.wheel_hole as f32,
+        wheel_gap: a.wheel_gap as f32,
+        wheel_opacity: a.wheel_opacity as f32 / 100.0,
+    }
 }
 
 pub fn style(app: &AppHandle) -> Style {
@@ -99,6 +124,8 @@ pub struct ThemeInfo {
     theme: String,
     accent: String,
     glass: Vec<String>,
+    hover: String,
+    appearance: crate::config::Appearance,
 }
 
 fn hex(c: [u8; 3]) -> String {
@@ -110,7 +137,7 @@ fn hex(c: [u8; 3]) -> String {
 pub fn theme_info(state: tauri::State<AppState>) -> ThemeInfo {
     let cfg = state.cfg();
     let st = style_for(&cfg);
-    ThemeInfo { theme: cfg.theme, accent: hex(st.accent), glass: st.glass.iter().map(|c| hex(*c)).collect() }
+    ThemeInfo { theme: cfg.theme, accent: hex(st.accent), glass: st.glass.iter().map(|c| hex(*c)).collect(), hover: hex(st.hover), appearance: cfg.appearance }
 }
 
 pub fn builder_effects(cfg: &Config) -> tauri::utils::config::WindowEffectsConfig {
@@ -119,7 +146,9 @@ pub fn builder_effects(cfg: &Config) -> tauri::utils::config::WindowEffectsConfi
         // Acrylic tinted faintly with the first glass colour
         let g = st.glass[0];
         let mix = |c: u8| (12.0 + c as f32 * 0.16) as u8;
-        EffectsBuilder::new().effect(Effect::Acrylic).color(Color(mix(g[0]), mix(g[1]), mix(g[2]), 70)).build()
+        // translucency 0 -> strong tint (frosted), 100 -> barely tinted (clear)
+        let alpha = (120.0 - st.translucency * 112.0) as u8;
+        EffectsBuilder::new().effect(Effect::Acrylic).color(Color(mix(g[0]), mix(g[1]), mix(g[2]), alpha)).build()
     } else {
         EffectsBuilder::new().effect(Effect::Mica).build()
     }
