@@ -312,3 +312,87 @@ pub fn add_tags(sidecar: &Path, tags: &[String]) -> Result<()> {
     notify_changed();
     Ok(())
 }
+
+/// Removes tags (case-insensitive) from a sidecar.
+pub fn remove_tags(sidecar: &Path, tags: &[String]) -> Result<()> {
+    update_sidecar(sidecar, |v| {
+        let cur: Vec<String> = v["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
+        let kept: Vec<String> = cur.into_iter().filter(|c| !tags.iter().any(|t| t.eq_ignore_ascii_case(c))).collect();
+        v["tags"] = json!(kept);
+    })?;
+    notify_changed();
+    Ok(())
+}
+
+/// Stars or un-stars an item (sidecar `favorite: true`; the field is absent when off).
+pub fn set_favorite(sidecar: &Path, on: bool) -> Result<()> {
+    update_sidecar(sidecar, |v| {
+        if on {
+            v["favorite"] = Value::Bool(true);
+        } else if let Some(m) = v.as_object_mut() {
+            m.remove("favorite");
+        }
+    })?;
+    notify_changed();
+    Ok(())
+}
+
+/// Cancels a fresh capture (the tag radial's Discard): deletes its content file, sidecar and gallery thumbnail
+/// for good. Holds the sidecar lock so a tag or caption still being written cannot bring the sidecar back.
+pub fn discard(sidecar: &Path) -> Result<()> {
+    {
+        let _g = SIDECAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let v = read_json(sidecar)?;
+        let dir = sidecar.parent().context("sidecar dir")?;
+        if let Some(name) = v["file"]["name"].as_str().filter(|n| !n.is_empty() && !n.contains(['/', '\\'])) {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
+        std::fs::remove_file(sidecar).context("remove sidecar")?;
+        if let (Some(root), Some(id)) = (dir.parent(), v["id"].as_str()) {
+            let _ = std::fs::remove_file(crate::gallery::thumb_path(root, id));
+        }
+    }
+    notify_changed();
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("stash-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn favorite_sets_and_clears_the_field() {
+        let root = temp_root("fav");
+        let saved = save_text(&root, "a note", "note", &SourceInfo::default()).unwrap();
+        set_favorite(&saved.sidecar, true).unwrap();
+        assert_eq!(read_json(&saved.sidecar).unwrap()["favorite"], Value::Bool(true));
+        set_favorite(&saved.sidecar, false).unwrap();
+        assert!(read_json(&saved.sidecar).unwrap().get("favorite").is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discard_removes_content_sidecar_and_thumb() {
+        let root = temp_root("discard");
+        let saved = save_text(&root, "throw me away", "note", &SourceInfo::default()).unwrap();
+        let v = read_json(&saved.sidecar).unwrap();
+        let content = saved.sidecar.parent().unwrap().join(v["file"]["name"].as_str().unwrap());
+        let thumb = crate::gallery::thumb_path(&root, v["id"].as_str().unwrap());
+        std::fs::create_dir_all(thumb.parent().unwrap()).unwrap();
+        std::fs::write(&thumb, b"x").unwrap();
+        assert!(content.exists());
+        discard(&saved.sidecar).unwrap();
+        assert!(!content.exists() && !saved.sidecar.exists() && !thumb.exists());
+        // a tag arriving after the discard must not bring the sidecar back
+        assert!(add_tags(&saved.sidecar, &["late".into()]).is_err());
+        assert!(!saved.sidecar.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

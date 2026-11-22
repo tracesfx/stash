@@ -35,13 +35,18 @@ pub struct Config {
     pub wheel_actions: Vec<String>,
     /// Close the settings window when it loses focus (changes are saved as they are made).
     pub settings_autoclose: bool,
+    /// Days trashed items are kept before they are deleted for good (0 = never).
+    pub trash_days: u32,
     /// Look revision. Missing in configs written before M6 (reads as 0), which then get the new glass defaults.
     #[serde(default)]
     pub style_rev: u32,
 }
 
-/// Current look revision (M6: neutral Liquid Glass only).
-pub const STYLE_REV: u32 = 3;
+/// Current look revision (M6: neutral Liquid Glass only; 4: menu animation picker).
+pub const STYLE_REV: u32 = 4;
+
+/// Opening animations of the wheel and the tag menu (Appearance > Menu animation).
+pub const MENU_ANIMS: [&str; 6] = ["petals", "fade", "zoom", "bounce", "swirl", "fan"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -78,8 +83,17 @@ pub struct Appearance {
     pub popup_corner: String,
     /// UI animations on/off.
     pub animations: bool,
-    /// Soft glow of the glass colours that follows the cursor, 0 (off)..100.
+    /// Soft glow of the glass colours that follows the cursor: on/off, strength 0..100, follow delay (ms).
+    pub cursor_glow_on: bool,
     pub cursor_glow: u8,
+    pub cursor_glow_lag: u16,
+    /// How the wheel and tag menu open: petals | fade | zoom | bounce | swirl | fan.
+    pub menu_anim: String,
+    /// Length of that opening animation (ms), 100..600.
+    pub menu_anim_ms: u16,
+    /// Legacy (style_rev < 4) Slice pop-in switch; read once by `Config::migrate`, never written.
+    #[serde(skip_serializing)]
+    pub slice_pop: bool,
     /// Legacy (style_rev < 3) Transparent switch; read once by `Config::migrate`, never written.
     #[serde(skip_serializing)]
     pub glass_clear: bool,
@@ -104,7 +118,12 @@ impl Default for Appearance {
             ui_radius: 12,
             popup_corner: "br".into(),
             animations: true,
-            cursor_glow: 35,
+            cursor_glow_on: true,
+            cursor_glow: 30,
+            cursor_glow_lag: 90,
+            menu_anim: "petals".into(),
+            menu_anim_ms: 260,
+            slice_pop: true,
             glass_clear: false,
         }
     }
@@ -126,6 +145,11 @@ impl Appearance {
         self.ui_font = self.ui_font.clamp(11, 18);
         self.ui_radius = self.ui_radius.min(20);
         self.cursor_glow = self.cursor_glow.min(100);
+        self.cursor_glow_lag = self.cursor_glow_lag.min(400);
+        self.menu_anim_ms = self.menu_anim_ms.clamp(100, 600);
+        if !MENU_ANIMS.contains(&self.menu_anim.as_str()) {
+            self.menu_anim = "petals".into();
+        }
         if !matches!(self.popup_corner.as_str(), "br" | "bl" | "tr" | "tl") {
             self.popup_corner = "br".into();
         }
@@ -153,6 +177,7 @@ impl Default for Config {
             rec_max_secs: 300,
             wheel_actions: crate::wheel::default_ids(),
             settings_autoclose: true,
+            trash_days: 30,
             glass: crate::theme::DEFAULT_GLASS.iter().map(|s| s.to_string()).collect(),
             style_rev: STYLE_REV,
         }
@@ -194,7 +219,7 @@ impl Config {
     /// Upgrades older configs. Returns true when something changed.
     fn migrate(&mut self) -> bool {
         let mut changed = false;
-        if self.style_rev < STYLE_REV {
+        if self.style_rev < 2 {
             // M6: the colourful glass wash and System/Light/Dark themes are gone; start from the new neutral look
             let d = Appearance::default();
             let a = &mut self.appearance;
@@ -214,6 +239,13 @@ impl Config {
                 a.glass_blur = 0;
             }
             a.glass_clear = false;
+            self.style_rev = 3;
+            changed = true;
+        }
+        if self.style_rev < 4 {
+            // the Slice pop-in switch became the Menu animation picker (pop-in = petals)
+            let a = &mut self.appearance;
+            a.menu_anim = if a.slice_pop { "petals" } else { "fade" }.into();
             self.style_rev = STYLE_REV;
             changed = true;
         }

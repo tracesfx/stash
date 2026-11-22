@@ -18,6 +18,9 @@ use crate::winutil::Frame;
 
 const MIN_SIZE: i32 = 4;
 const ESC_TIMER: usize = 1;
+/// A plain click (no drag) this soon after the overlay appears is ignored instead of cancelling: the tail of the
+/// click that picked Region on the wheel, or a double-click, must not throw the snip away. Dragging works at once.
+const ARM_MS: u128 = 450;
 
 struct State {
     w: i32,
@@ -32,6 +35,7 @@ struct State {
     sel: Option<RECT>,
     result: Option<RECT>,
     done: bool,
+    shown: std::time::Instant,
 }
 
 fn norm(a: POINT, b: POINT) -> RECT {
@@ -106,6 +110,7 @@ pub fn select_region(frame: &Frame, style: Style, scale: f32) -> Option<RECT> {
             sel: None,
             result: None,
             done: false,
+            shown: std::time::Instant::now(),
         });
 
         let hinst = GetModuleHandleW(None).ok()?;
@@ -207,11 +212,17 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             WM_LBUTTONUP => {
                 if let Some(st) = state(hwnd) {
                     let _ = ReleaseCapture();
-                    if let Some(s) = st.start.take() {
-                        let r = norm(s, point_of(lparam));
-                        if r.right - r.left >= MIN_SIZE && r.bottom - r.top >= MIN_SIZE {
-                            st.result = Some(r);
-                        }
+                    let Some(s) = st.start.take() else {
+                        return LRESULT(0); // the release of an ignored early press
+                    };
+                    let r = norm(s, point_of(lparam));
+                    if r.right - r.left >= MIN_SIZE && r.bottom - r.top >= MIN_SIZE {
+                        st.result = Some(r);
+                    } else if st.shown.elapsed().as_millis() < ARM_MS {
+                        // an accidental early click: forget it and keep waiting for a drag
+                        st.sel = None;
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        return LRESULT(0);
                     }
                     st.done = true; // a plain click without a drag cancels
                 }

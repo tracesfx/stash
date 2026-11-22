@@ -24,6 +24,8 @@ struct Entry {
 #[derive(Default)]
 pub struct GalleryState {
     index: Mutex<HashMap<String, Entry>>,
+    /// Items in `.trash` (for thumbnails in the Trash tab).
+    trash_index: Mutex<HashMap<String, Entry>>,
 }
 
 #[derive(Serialize)]
@@ -53,6 +55,10 @@ pub struct ItemDto {
     board: Option<String>,
     /// Text recognised inside the image (OCR), for search.
     ocr: Option<String>,
+    /// When it was moved to the trash (Trash tab only).
+    trashed: Option<String>,
+    /// Starred (Favourites tab).
+    favorite: bool,
 }
 
 fn root(app: &AppHandle) -> PathBuf {
@@ -95,10 +101,15 @@ fn clean_tags(tags: impl IntoIterator<Item = String>) -> Vec<String> {
 }
 
 fn scan(root: &Path, ocr_on: bool) -> (Vec<ItemDto>, HashMap<String, Entry>) {
+    scan_in(root, root, ocr_on)
+}
+
+/// Walks `<base>/YYYY-MM/*.json` (`base` = the library, or its `.trash`).
+fn scan_in(root: &Path, base: &Path, ocr_on: bool) -> (Vec<ItemDto>, HashMap<String, Entry>) {
     let mut items = Vec::new();
     let mut map = HashMap::new();
     let generic_icon = ensure_generic_icon(root);
-    let Ok(months) = std::fs::read_dir(root) else { return (items, map) };
+    let Ok(months) = std::fs::read_dir(base) else { return (items, map) };
     for m in months.flatten() {
         let mp = m.path();
         if !mp.is_dir() || m.file_name().to_string_lossy().starts_with('.') {
@@ -131,6 +142,15 @@ fn scan(root: &Path, ocr_on: bool) -> (Vec<ItemDto>, HashMap<String, Entry>) {
                 .map(|t| t.replace("[InternetShortcut]\r\nURL=", "").chars().take(400).collect());
             let thumb = thumb_path(root, &id);
             let icon = if thumb.exists() { thumb } else { generic_icon.clone() };
+            // imported pictures may have no stored size: read it from the file header (cheap), so the gallery lays
+            // them out right the first time instead of re-flowing once each picture has loaded
+            let (mut iw, mut ih) = (v["image"]["w"].as_u64(), v["image"]["h"].as_u64());
+            if kind == "image"
+                && (iw.is_none() || ih.is_none())
+                && let Ok((a, b)) = image::image_dimensions(&content)
+            {
+                (iw, ih) = (Some(a as u64), Some(b as u64));
+            }
             items.push(ItemDto {
                 id: id.clone(),
                 kind,
@@ -145,8 +165,8 @@ fn scan(root: &Path, ocr_on: bool) -> (Vec<ItemDto>, HashMap<String, Entry>) {
                 name,
                 bytes: v["file"]["bytes"].as_u64().unwrap_or(0),
                 mime: v["file"]["mime"].as_str().unwrap_or("").to_string(),
-                w: v["image"]["w"].as_u64(),
-                h: v["image"]["h"].as_u64(),
+                w: iw,
+                h: ih,
                 original_path: v["file"]["original_path"].as_str().map(String::from),
                 text,
                 path: content.to_string_lossy().into_owned(),
@@ -154,6 +174,8 @@ fn scan(root: &Path, ocr_on: bool) -> (Vec<ItemDto>, HashMap<String, Entry>) {
                 palette: v["palette"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default(),
                 board: v["board"].as_str().filter(|b| !b.is_empty()).map(String::from),
                 ocr: v["ocr"].as_str().filter(|t| !t.is_empty()).map(|t| t.chars().take(4000).collect()),
+                trashed: v["trashed"].as_str().map(String::from),
+                favorite: v["favorite"].as_bool().unwrap_or(false),
             });
             map.insert(id, Entry { content, sidecar: sp, needs });
         }
@@ -165,7 +187,7 @@ fn scan(root: &Path, ocr_on: bool) -> (Vec<ItemDto>, HashMap<String, Entry>) {
 fn thumbs_dir(root: &Path) -> PathBuf {
     root.join(".thumbs")
 }
-fn thumb_path(root: &Path, id: &str) -> PathBuf {
+pub(crate) fn thumb_path(root: &Path, id: &str) -> PathBuf {
     thumbs_dir(root).join(format!("{id}.png"))
 }
 
@@ -298,7 +320,8 @@ pub fn serve(app: &AppHandle, uri_path: &str, range: Option<&str>) -> Served {
     let mut parts = uri_path.trim_start_matches('/').splitn(2, '/');
     let (kind, id) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     let path = {
-        let entry = app.state::<GalleryState>().index.lock().unwrap().get(id).cloned();
+        let st = app.state::<GalleryState>();
+        let entry = st.index.lock().unwrap().get(id).cloned().or_else(|| st.trash_index.lock().unwrap().get(id).cloned());
         let Some(e) = entry else { return not_found() };
         if kind == "thumb" { make_thumb(&root(app), id, &e.content).unwrap_or(e.content.clone()) } else { e.content.clone() }
     };
@@ -374,11 +397,18 @@ pub fn gallery_delete(ids: Vec<String>, app: AppHandle, state: State<GalleryStat
         let mut moved = Vec::new();
         for id in ids {
             let Ok(e) = entry(&state, &id) else { continue };
+            // favourites are protected from deletion (un-star first)
+            if library::read_json(&e.sidecar).is_ok_and(|v| v["favorite"].as_bool() == Some(true)) {
+                continue;
+            }
             let month = e.sidecar.parent().and_then(|p| p.file_name()).map(|n| n.to_owned()).context("month dir")?;
             let dest = root.join(".trash").join(month);
             std::fs::create_dir_all(&dest)?;
             std::fs::rename(&e.content, dest.join(e.content.file_name().context("name")?))?;
-            std::fs::rename(&e.sidecar, dest.join(e.sidecar.file_name().context("name")?))?;
+            let sc = dest.join(e.sidecar.file_name().context("name")?);
+            std::fs::rename(&e.sidecar, &sc)?;
+            // the Trash tab counts the auto-empty delay from here
+            let _ = library::update_sidecar(&sc, |v| v["trashed"] = Value::String(now_stamp()));
             let _ = std::fs::remove_file(thumb_path(&root, &id));
             state.index.lock().unwrap().remove(&id);
             moved.push(id);
@@ -400,6 +430,13 @@ pub fn gallery_restore(ids: Vec<String>, app: AppHandle) -> Result<(), String> {
                     let dest = root.join(month.file_name());
                     std::fs::create_dir_all(&dest)?;
                     std::fs::rename(f.path(), dest.join(&name))?;
+                    if name.ends_with(".json") {
+                        let _ = library::update_sidecar(&dest.join(&name), |v| {
+                            if let Some(m) = v.as_object_mut() {
+                                m.remove("trashed");
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -627,34 +664,199 @@ pub fn gallery_tag(ids: Vec<String>, add: Vec<String>, remove: Vec<String>, stat
     })())
 }
 
-// ---------- canvas views: <root>/.views/<scope>.json ----------
-
-fn view_path(root: &Path, scope: &str) -> Result<PathBuf> {
-    let safe: String = scope.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(120).collect();
-    if safe.is_empty() {
-        return Err(anyhow!("empty view scope"));
+/// A small (96 px) picture for a native file drag, so dragging out looks like dragging a file, not a big preview.
+#[tauri::command]
+pub fn gallery_drag_icon(id: String, app: AppHandle, state: State<GalleryState>) -> String {
+    let root = root(&app);
+    let generic = ensure_generic_icon(&root);
+    let Ok(e) = entry(&state, &id) else { return generic.to_string_lossy().into_owned() };
+    let out = thumbs_dir(&root).join(format!("{id}.drag.png"));
+    if out.exists() {
+        return out.to_string_lossy().into_owned();
     }
-    Ok(root.join(".views").join(format!("{safe}.json")))
+    let src = thumb_path(&root, &id);
+    let small = image::open(if src.exists() { &src } else { &e.content }).ok().map(|i| i.thumbnail(96, 96).to_rgba8());
+    match small {
+        Some(t) if t.save(&out).is_ok() => out.to_string_lossy().into_owned(),
+        _ => generic.to_string_lossy().into_owned(),
+    }
 }
 
-/// Saved canvas layout for a scope (item positions, pan and zoom), or null.
+/// Stars / un-stars items (the gallery updates itself, so this does not emit library-changed).
 #[tauri::command]
-pub fn gallery_view_load(scope: String, app: AppHandle) -> Result<Value, String> {
+pub fn gallery_favorite(ids: Vec<String>, on: bool, state: State<GalleryState>) -> Result<(), String> {
     err((|| {
-        let p = view_path(&root(&app), &scope)?;
-        Ok(library::read_json(&p).unwrap_or(Value::Null))
-    })())
-}
-
-#[tauri::command]
-pub fn gallery_view_save(scope: String, data: Value, app: AppHandle) -> Result<(), String> {
-    err((|| {
-        let p = view_path(&root(&app), &scope)?;
-        if let Some(d) = p.parent() {
-            std::fs::create_dir_all(d)?;
+        for id in ids {
+            let e = entry(&state, &id)?;
+            library::update_sidecar(&e.sidecar, |v| {
+                if on {
+                    v["favorite"] = Value::Bool(true);
+                } else if let Some(m) = v.as_object_mut() {
+                    m.remove("favorite");
+                }
+            })?;
         }
-        library::write_atomic(&p, serde_json::to_string(&data)?.as_bytes())
+        Ok(())
     })())
+}
+
+// ---------- favourite tags ----------
+// Starred tags are pinned at the top of the gallery rail. They are library data, so they live in the library
+// (`<library>/.tags.json`, synced with it) rather than in config.json (which settings autosave rewrites whole).
+
+fn tags_file(root: &Path) -> PathBuf {
+    root.join(".tags.json")
+}
+
+#[tauri::command]
+pub fn gallery_fav_tags(app: AppHandle) -> Vec<String> {
+    let p = tags_file(&root(&app));
+    library::read_json(&p)
+        .ok()
+        .and_then(|v| v["favorites"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn gallery_set_fav_tags(tags: Vec<String>, app: AppHandle) -> Result<(), String> {
+    err((|| {
+        let p = tags_file(&root(&app));
+        let mut v = library::read_json(&p).unwrap_or_else(|_| serde_json::json!({}));
+        if !v.is_object() {
+            v = serde_json::json!({});
+        }
+        v["favorites"] = serde_json::json!(clean_tags(tags));
+        library::write_atomic(&p, serde_json::to_string_pretty(&v)?.as_bytes())
+    })())
+}
+
+// ---------- trash tab ----------
+
+fn now_stamp() -> String {
+    Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Deletes trashed items for good once they have been in `.trash` longer than `days` (0 = never). Items trashed
+/// before the Trash tab existed are stamped with today first, so they still get the full grace period.
+pub fn purge_expired(root: &Path, days: u32) {
+    let (items, map) = scan_in(root, &root.join(".trash"), false);
+    let now = Local::now().fixed_offset();
+    for it in items {
+        let Some(e) = map.get(&it.id) else { continue };
+        let when = it.trashed.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok());
+        match when {
+            None => {
+                let _ = library::update_sidecar(&e.sidecar, |v| v["trashed"] = Value::String(now_stamp()));
+            }
+            Some(t) if days > 0 && (now - t).num_days() >= days as i64 => {
+                let _ = std::fs::remove_file(&e.content);
+                let _ = std::fs::remove_file(&e.sidecar);
+                let _ = std::fs::remove_file(thumb_path(root, &it.id));
+                tracing::info!("trash: removed {} after {days} days", it.id);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Items in the trash, most recently deleted first (expired ones are removed first).
+#[tauri::command]
+pub async fn gallery_trash_list(app: AppHandle, state: State<'_, GalleryState>) -> Result<Vec<ItemDto>, String> {
+    let root = root(&app);
+    let days = app.state::<AppState>().cfg().trash_days;
+    let (mut items, map) = tauri::async_runtime::spawn_blocking(move || {
+        purge_expired(&root, days);
+        scan_in(&root, &root.join(".trash"), false)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    items.sort_by(|a, b| b.trashed.cmp(&a.trashed).then(b.id.cmp(&a.id)));
+    *state.trash_index.lock().unwrap() = map;
+    Ok(items)
+}
+
+/// Deletes trashed items for good (`ids` empty = empty the whole trash).
+#[tauri::command]
+pub fn gallery_purge(ids: Vec<String>, app: AppHandle, state: State<GalleryState>) -> Result<usize, String> {
+    let root = root(&app);
+    let mut idx = state.trash_index.lock().unwrap();
+    let doomed: Vec<String> = if ids.is_empty() { idx.keys().cloned().collect() } else { ids };
+    let mut n = 0;
+    for id in doomed {
+        if let Some(e) = idx.remove(&id) {
+            let _ = std::fs::remove_file(&e.content);
+            let _ = std::fs::remove_file(&e.sidecar);
+            let _ = std::fs::remove_file(thumb_path(&root, &id));
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+// ---------- canvases: <root>/.canvases/<id>.json ----------
+// A canvas is a named board of library items (positions, cluster labels, pan, zoom). The gallery creates one
+// from a selection and lists them in its Canvases tab.
+
+fn canvas_path(root: &Path, id: &str) -> Result<PathBuf> {
+    let safe: String = id.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(80).collect();
+    if safe.is_empty() || safe != id {
+        return Err(anyhow!("bad canvas id"));
+    }
+    Ok(root.join(".canvases").join(format!("{safe}.json")))
+}
+
+#[derive(Serialize)]
+pub struct CanvasInfo {
+    id: String,
+    name: String,
+    created: String,
+    modified: String,
+    ids: Vec<String>,
+}
+
+#[tauri::command]
+pub fn canvas_list(app: AppHandle) -> Result<Vec<CanvasInfo>, String> {
+    let dir = root(&app).join(".canvases");
+    let mut out = Vec::new();
+    for f in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        if f.path().extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(v) = library::read_json(&f.path()) else { continue };
+        out.push(CanvasInfo {
+            id: s(&v, "id"),
+            name: s(&v, "name"),
+            created: s(&v, "created"),
+            modified: s(&v, "modified"),
+            ids: v["ids"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
+        });
+    }
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    Ok(out)
+}
+
+#[tauri::command]
+pub fn canvas_load(id: String, app: AppHandle) -> Result<Value, String> {
+    err((|| library::read_json(&canvas_path(&root(&app), &id)?))())
+}
+
+/// Saves a canvas; returns its new `modified` stamp.
+#[tauri::command]
+pub fn canvas_save(id: String, mut data: Value, app: AppHandle) -> Result<String, String> {
+    err((|| {
+        let p = canvas_path(&root(&app), &id)?;
+        std::fs::create_dir_all(p.parent().context("canvas dir")?)?;
+        let stamp = Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        data["id"] = Value::String(id.clone());
+        data["modified"] = Value::String(stamp.clone());
+        library::write_atomic(&p, serde_json::to_string(&data)?.as_bytes())?;
+        Ok(stamp)
+    })())
+}
+
+#[tauri::command]
+pub fn canvas_delete(id: String, app: AppHandle) -> Result<(), String> {
+    err((|| Ok(std::fs::remove_file(canvas_path(&root(&app), &id)?)?))())
 }
 
 // ---------- export ----------

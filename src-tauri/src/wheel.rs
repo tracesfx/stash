@@ -97,7 +97,6 @@ const TIMER: usize = 1;
 const OUTER_R: f32 = 150.0;
 const MARGIN: f32 = 22.0; // room for the shadow
 const GROW: f32 = 9.0;
-const OPEN_MS: f32 = 130.0;
 const HOVER_MS: f32 = 90.0;
 
 struct State {
@@ -263,13 +262,14 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     // animate hover progress and the open transition
                     let dt = st.last.elapsed().as_secs_f32() * 1000.0;
                     st.last = Instant::now();
-                    let mut animating = hover_changed || st.t0.elapsed().as_secs_f32() * 1000.0 < OPEN_MS + 16.0;
+                    let open_ms = gfx::open_total_ms(&st.style);
+                    let mut animating = hover_changed || st.t0.elapsed().as_secs_f32() * 1000.0 < open_ms + 16.0;
                     if st.style.glow > 0.0 {
                         let mut p = POINT::default();
                         let _ = GetCursorPos(&mut p);
-                        let g = ((p.x - st.origin.x) as f32, (p.y - st.origin.y) as f32);
-                        if g != st.glow_pt {
-                            st.glow_pt = g;
+                        let (nx, ny) = gfx::GLOW_NUDGE;
+                        let target = ((p.x - st.origin.x) as f32 + nx * st.scale, (p.y - st.origin.y) as f32 + ny * st.scale);
+                        if gfx::glow_follow(&mut st.glow_pt, target, dt, &st.style) {
                             animating = true;
                         }
                     }
@@ -316,20 +316,11 @@ unsafe fn present(hwnd: HWND, st: &mut State) {
     unsafe {
         let s = st.size as u32;
         let age = st.t0.elapsed().as_secs_f32() * 1000.0;
-        let k = ease((age / OPEN_MS).clamp(0.0, 1.0));
         let scene = render(st);
-        // open animation: scale up + fade in around the centre
-        let mut out = Pixmap::new(s, s).unwrap();
-        let sc = 0.9 + 0.1 * k;
+        // open animation (Appearance > Menu animation): the whole wheel fades / scales around its centre
+        let (op, sc) = gfx::open_window(&st.style, age);
         let c = s as f32 / 2.0;
-        out.draw_pixmap(
-            0,
-            0,
-            scene.as_ref(),
-            &PixmapPaint { opacity: k * st.opacity, quality: FilterQuality::Bilinear, ..Default::default() },
-            Transform::from_row(sc, 0.0, 0.0, sc, c * (1.0 - sc), c * (1.0 - sc)),
-            None,
-        );
+        let out = gfx::compose(&scene, op * st.opacity, sc, c, c);
         // RGBA (premultiplied) -> BGRA DIB
         let dst = std::slice::from_raw_parts_mut(st.dib_bits, (s * s * 4) as usize);
         for (d, p) in dst.chunks_exact_mut(4).zip(out.data().chunks_exact(4)) {
@@ -399,8 +390,17 @@ fn render(st: &State) -> Pixmap {
     let white = [255u8, 255, 255];
     let mut pm = Pixmap::new(s, s).unwrap();
 
-    let radii: Vec<f32> = (0..st.acts.len()).map(|i| r_out + GROW * sc * ease(st.hprog[i])).collect();
-    let paths: Vec<Path> = (0..st.acts.len()).map(|i| wedge_path(c, i, st.acts.len(), r_in, radii[i], st.gap * sc)).collect();
+    let n = st.acts.len();
+    let radii: Vec<f32> = (0..n).map(|i| r_out + GROW * sc * ease(st.hprog[i])).collect();
+    // per-slice part of the opening animation (petals pop in one by one, a fan spreads, a swirl turns)
+    let age = st.t0.elapsed().as_secs_f32() * 1000.0;
+    let pops: Vec<gfx::SliceAnim> = (0..n).map(|i| gfx::open_slice(&st.style, age, i, n)).collect();
+    let paths: Vec<Path> = (0..n)
+        .map(|i| {
+            let p = wedge_path(c, i, n, r_in, radii[i], st.gap * sc);
+            gfx::pose_slice(&p, pops[i], c, c).unwrap_or(p)
+        })
+        .collect();
 
     // soft drop shadow: stacked translucent discs, offset down
     for k in (1..=7).rev() {
@@ -413,8 +413,10 @@ fn render(st: &State) -> Pixmap {
     // one glass body: all wedges + the centre disc
     let disc = PathBuilder::from_circle(c, c, r_in - st.gap * sc);
     let mut pb = PathBuilder::new();
-    for p in &paths {
-        pb.push_path(p);
+    for (i, p) in paths.iter().enumerate() {
+        if pops[i].a > 0.0 {
+            pb.push_path(p);
+        }
     }
     if let Some(d) = &disc {
         pb.push_path(d);
@@ -423,11 +425,14 @@ fn render(st: &State) -> Pixmap {
     if let Some(body) = pb.finish() {
         pm.fill_path(&body, &Paint { blend_mode: BlendMode::Clear, ..Default::default() }, FillRule::Winding, Transform::identity(), None);
         gfx::glass_fill(&mut pm, &body, bounds, st.bg.as_ref(), &st.style, 1.0);
-        gfx::cursor_glow(&mut pm, &body, st.glow_pt.0, st.glow_pt.1, r_out * 0.85, &st.style);
+        gfx::cursor_glow(&mut pm, &body, st.glow_pt.0, st.glow_pt.1, r_out * 1.3, &st.style);
     }
 
     let acc = st.style.hover;
     for (i, p) in paths.iter().enumerate() {
+        if pops[i].a <= 0.0 {
+            continue;
+        }
         let h = st.hprog[i];
         pm.fill_path(p, &paint_rgba(255, 255, 255, 8), FillRule::Winding, Transform::identity(), None);
         if h > 0.0 {
@@ -439,8 +444,13 @@ fn render(st: &State) -> Pixmap {
     // icons
     for i in 0..st.acts.len() {
         let h = ease(st.hprog[i]);
-        let (x, y) = pt(c, (r_in + radii[i]) / 2.0 + 1.0 * sc, i as f32 * (360.0 / st.acts.len() as f32));
-        draw_icon(&mut pm, st.acts[i], x, y, (13.0 + 2.5 * h) * sc, white, 235, 1.7 * sc);
+        let gfx::SliceAnim { k, a, rot } = pops[i];
+        let (x, y) = pt(c, (r_in + radii[i]) / 2.0 + 1.0 * sc, i as f32 * (360.0 / n as f32) + rot);
+        if a <= 0.0 {
+            continue;
+        }
+        let (x, y) = (c + (x - c) * k, c + (y - c) * k);
+        draw_icon(&mut pm, st.acts[i], x, y, (13.0 + 2.5 * h) * sc * k, white, (235.0 * a) as u8, 1.7 * sc);
     }
 
     // centre disc with the hovered action's name

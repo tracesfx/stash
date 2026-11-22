@@ -1,6 +1,6 @@
 [package]
 name = "stash"
-version = "0.2.0"
+version = "1.0.0"
 description = "Fast inspiration capture"
 license = "MIT"
 repository = "https://github.com/tracesfx/stash"

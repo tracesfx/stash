@@ -1,12 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- tray icon (scripts/make-icons.mjs renders it at 64 px): simplified app icon, crisp at 16-32 px -->
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7aa2ff"/><stop offset="1" stop-color="#3556d6"/></linearGradient>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4f7cff"/><stop offset=".55" stop-color="#7a5cff"/><stop offset="1" stop-color="#38c4dc"/></linearGradient>
+    <linearGradient id="hi" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".34"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/></linearGradient>
   </defs>
-  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#g)"/>
-  <g fill="none" stroke="#fff" stroke-width="58" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M250 424V250h174"/><path d="M600 250h174v174"/><path d="M774 600v174H600"/><path d="M424 774H250V600"/>
+  <rect x="64" y="64" width="896" height="896" rx="232" fill="url(#g)"/>
+  <rect x="64" y="64" width="896" height="896" rx="232" fill="url(#hi)"/>
+  <rect x="68" y="68" width="888" height="888" rx="228" fill="none" stroke="#fff" stroke-opacity=".35" stroke-width="8"/>
+  <g fill="none" stroke="#fff" stroke-opacity="1" stroke-width="66" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M262 448V292h156"/><path d="M606 292h156v156"/><path d="M762 576v156H606"/><path d="M418 732H262V576"/>
   </g>
-  <circle cx="512" cy="512" r="64" fill="#fff"/>
+  <circle cx="512" cy="512" r="72" fill="#fff"/>
   <circle cx="770" cy="770" r="190" fill="#ff9f1c" stroke="#1b1b20" stroke-width="40"/>
   <rect x="744" y="670" width="52" height="120" rx="24" fill="#1b1b20"/><circle cx="770" cy="838" r="30" fill="#1b1b20"/>
 </svg>

@@ -10,12 +10,12 @@ interface Appearance {
   glass_translucency: number; glass_blur: number; glass_saturation: number; glass_tint: number; hover_color: string;
   win_translucency: number; win_blur: number; win_saturation: number;
   wheel_size: number; wheel_hole: number; wheel_gap: number; wheel_opacity: number; ui_font: number; ui_radius: number;
-  popup_corner: string; animations: boolean; cursor_glow: number;
+  popup_corner: string; animations: boolean; cursor_glow: number; cursor_glow_on: boolean; cursor_glow_lag: number; menu_anim: string; menu_anim_ms: number;
 }
 interface Config {
   library_path: string; hotkey: string; hold_ms: number; capture_url: boolean; tag_menu: boolean;
   autostart: boolean; glass: string[]; ocr: boolean; appearance: Appearance; rec_system_audio: boolean; rec_mic: boolean;
-  rec_fps: number; rec_max_secs: number; wheel_actions: string[]; style_rev: number; settings_autoclose: boolean;
+  rec_fps: number; rec_max_secs: number; wheel_actions: string[]; style_rev: number; settings_autoclose: boolean; trash_days: number;
 }
 interface Dto { config: Config; autostart_supported: boolean; }
 
@@ -85,6 +85,9 @@ function row(label: string, hint: string, control: HTMLElement, o: RowOpts = {})
   }
   return r;
 }
+
+/** Marks a row as advanced: hidden while the footer's Advanced switch is off. */
+function adv<T extends HTMLElement>(r: T): T { r.classList.add("adv"); return r; }
 
 function group(title: string, ...rows: HTMLElement[]): HTMLElement[] {
   const g = el("div", "group");
@@ -196,10 +199,12 @@ const tabBtns: Record<string, HTMLButtonElement> = {};
 const ind = el("span", "ind");
 let current = "capture";
 
-function showAppearanceTab(on: boolean) {
+/** Advanced on: every setting plus the Appearance tab. Off: only the basic settings. */
+function showAdvanced(on: boolean) {
   tabBtns.appearance.style.display = on ? "" : "none";
+  document.body.classList.toggle("basic", !on);
   $("appBtn").classList.toggle("on", on);
-  try { localStorage.setItem("stash.settings.appearance", on ? "1" : "0"); } catch { /* storage unavailable */ }
+  try { localStorage.setItem("stash.settings.advanced", on ? "1" : "0"); } catch { /* storage unavailable */ }
   if (!on && current === "appearance") select("capture");
   else moveIndicator();
 }
@@ -220,7 +225,7 @@ function select(id: string) {
   }
   moveIndicator();
   $("panes").scrollTop = 0;
-  if (id === "appearance") refreshPreview();
+  if (id === "appearance") { refreshPreview(); setTimeout(() => animIntro(), 260); }
 }
 
 function buildTabs() {
@@ -258,7 +263,7 @@ function buildCapture() {
   showKeys(draft.hotkey);
   const hold = sliderRow("Wheel hold delay", "How long to hold the shortcut before the radial wheel opens. A shorter press is a snip.", { min: 80, max: 1000, step: 10, value: draft.hold_ms, fmt: ms, onInput: (v) => (draft.hold_ms = v) });
 
-  const tagRow = row("Tag menu after capture", "A ring of your recent tags around the capture. Click one, or type a new tag; Tab switches to a caption. It disappears when you move the pointer off it. When off, a small toast confirms the save.", toggle(draft.tag_menu, (v) => (draft.tag_menu = v)));
+  const tagRow = row("Tag menu after capture", "A ring of your recent tags at the cursor, with Star (add to Favourites) and Discard (do not keep the capture) in the middle. Click a tag or type a new one; Tab switches to a caption. It disappears when you move the pointer off it, then a toast confirms the save. When off, only the toast shows.", toggle(draft.tag_menu, (v) => (draft.tag_menu = v)));
 
   const corners = el("div", "corners");
   for (const c of ["tl", "tr", "bl", "br"]) {
@@ -272,10 +277,10 @@ function buildCapture() {
   panes.capture.append(
     ...group("Shortcut",
       row("Capture shortcut", "Tap to snip a region. Hold for the radial wheel. Needs a modifier (Ctrl, Alt, Shift or Win).", ctl),
-      hold.row),
+      adv(hold.row)),
     ...group("After a capture", tagRow,
-      row("Toast position", "Screen corner for confirmation toasts. The quick note starts here too until you move it.", corners),
-      row("Quick note position", "Drag the note bar anywhere; it reopens where you left it.", resetNote)),
+      adv(row("Toast position", "Screen corner for confirmation toasts. The quick note starts here too until you move it.", corners)),
+      adv(row("Quick note position", "Drag the note bar anywhere; it reopens where you left it.", resetNote))),
   );
 }
 
@@ -337,7 +342,7 @@ function buildRecording() {
     ...group("Audio",
       row("Record system audio", "Clips include what you hear (desktop audio).", toggle(draft.rec_system_audio, (v) => (draft.rec_system_audio = v))),
       row("Record microphone", "Clips include your default microphone.", toggle(draft.rec_mic, (v) => (draft.rec_mic = v)))),
-    ...group("Video", fps.row, max.row),
+    ...group("Video", adv(fps.row), adv(max.row)),
   );
 }
 
@@ -357,13 +362,16 @@ function buildGeneral() {
     if (typeof dir === "string") { lib.value = dir; draft.library_path = dir; commit(true); }
   };
   f.append(lib, browse);
+  const trashRow = sliderRow("Empty trash after", "Deleted items wait in the gallery's Trash tab, then are removed for good.",
+    { min: 0, max: 365, stops: [1, 7, 14, 30, 60, 90, 365, 0], value: draft.trash_days ?? 30, fmt: (v) => (v === 0 ? "Never" : v === 1 ? "1 day" : `${v} days`), onInput: (v) => (draft.trash_days = v) }).row;
   panes.general.append(
     ...group("Library",
       row("Library folder", "A OneDrive or Dropbox folder keeps it synced. Only new captures go to a new folder; move old files yourself.", f, { stack: true }),
-      row("Search text inside images", "Reads text in screenshots with the OCR built into Windows, on this PC only.", toggle(draft.ocr, (v) => (draft.ocr = v))),
-      row("Record page URL from browsers", "Reads the address bar through Windows UI Automation. Chromium browsers may load pages slightly slower.", toggle(draft.capture_url, (v) => (draft.capture_url = v)))),
+      trashRow,
+      adv(row("Search text inside images", "Reads text in screenshots with the OCR built into Windows, on this PC only.", toggle(draft.ocr, (v) => (draft.ocr = v)))),
+      adv(row("Record page URL from browsers", "Reads the address bar through Windows UI Automation. Chromium browsers may load pages slightly slower.", toggle(draft.capture_url, (v) => (draft.capture_url = v))))),
     ...group("System",
-      row("Close settings when clicking elsewhere", "Changes are saved as you make them, so nothing is lost.", toggle(draft.settings_autoclose, (v) => (draft.settings_autoclose = v))),
+      adv(row("Close settings when clicking elsewhere", "Changes are saved as you make them, so nothing is lost.", toggle(draft.settings_autoclose, (v) => (draft.settings_autoclose = v)))),
       row("Start with Windows", autostartSupported ? "Runs quietly in the tray at sign-in." : "Only applies to the installed (release) build.", toggle(draft.autostart, (v) => (draft.autostart = v), !autostartSupported))),
   );
 }
@@ -382,7 +390,8 @@ const NATIVE_LOOK: ADef[] = [
   ["glass_translucency", "Translucency", "How thin the dark tint is.", 0, 100, 1, "%"],
   ["glass_saturation", "Saturation", "Colour boost of the blurred background.", 100, 250, 5, "%"],
 ];
-const GLOW: ADef = ["cursor_glow", "Cursor glow", "A soft light in the glass colours that follows the pointer. 0 = off.", 0, 100, 1, "%"];
+const GLOW: ADef = ["cursor_glow", "Glow strength", "", 0, 100, 1, "%"];
+const GLOW_LAG: ADef = ["cursor_glow_lag", "Glow follow delay", "How far the glow trails behind the pointer. 0 = stuck to it.", 0, 400, 10, "ms"];
 const SHEEN: ADef = ["glass_tint", "Colour sheen", "How strongly the glass colours tint every glass surface.", 0, 100, 1, "%"];
 const WHEEL_LOOK: ADef[] = [
   ["wheel_size", "Size", "", 60, 160, 5, "%"],
@@ -394,12 +403,161 @@ const UI_LOOK: ADef[] = [
   ["ui_font", "Text size", "", 11, 18, 1, "px"],
   ["ui_radius", "Corner roundness", "", 0, 20, 1, "px"],
 ];
+// ---------- menu animation picker ----------
+// The curves mirror gfx::open_window / gfx::open_slice (Rust), so the mini wheels play what the real wheel and
+// tag menu will do.
+type MenuAnim = "petals" | "fade" | "zoom" | "bounce" | "swirl" | "fan";
+const ANIMS: [MenuAnim, string, string][] = [
+  ["petals", "Petals", "Slices pop in one by one"],
+  ["fade", "Fade", "A soft, quiet fade"],
+  ["zoom", "Zoom", "Grows in with a long glide"],
+  ["bounce", "Bounce", "Springs past full size"],
+  ["swirl", "Swirl", "Turns into place"],
+  ["fan", "Fan", "Unfolds clockwise"],
+];
+const cl = (t: number) => Math.min(1, Math.max(0, t));
+const easeOut = (t: number) => 1 - (1 - cl(t)) ** 3;
+const easeQuart = (t: number) => 1 - (1 - cl(t)) ** 4;
+const easeQuint = (t: number) => 1 - (1 - cl(t)) ** 5;
+const smoothstep = (t: number) => { t = cl(t); return t * t * (3 - 2 * t); };
+const back = (t: number, c1: number) => { const u = cl(t) - 1; return 1 + (c1 + 1) * u * u * u + c1 * u * u; };
+const springC = (t: number) => (t >= 1 ? 1 : 1 - Math.exp(-6 * Math.max(0, t)) * Math.cos(3 * Math.PI * Math.max(0, t)));
+function openWindow(a: MenuAnim, d: number, age: number): [number, number] {
+  const t = (f: number) => cl(age / (d * f));
+  switch (a) {
+    case "petals": { const k = easeOut(t(0.55)); return [k, 0.9 + 0.1 * k]; }
+    case "fade": { const k = smoothstep(t(1)); return [k, 0.985 + 0.015 * k]; }
+    case "zoom": return [easeOut(t(0.6)), 0.72 + 0.28 * easeQuint(t(1))];
+    case "bounce": return [easeOut(t(0.3)), 0.5 + 0.5 * springC(t(1))];
+    case "swirl": return [easeOut(t(0.6)), 0.8 + 0.2 * easeQuart(t(1))];
+    case "fan": return [easeOut(t(0.35)), 0.95 + 0.05 * easeOut(t(1))];
+  }
+}
+function openSlice(a: MenuAnim, d: number, age: number, i: number, n: number): { k: number; a: number; rot: number } {
+  const t = cl(age / d);
+  if (a === "petals") {
+    const step = Math.min((0.5 * d) / (Math.max(n, 2) - 1), (22 * d) / 240);
+    const u = cl((age - i * step) / (0.5 * d));
+    return u <= 0 ? { k: 0.7, a: 0, rot: 0 } : { k: 0.7 + 0.3 * back(u, 1.3), a: easeOut(u * 1.6), rot: 0 };
+  }
+  if (a === "swirl") return { k: 1, a: 1, rot: -50 * (1 - easeQuart(t)) };
+  if (a === "fan") { const e = easeQuart(t); return { k: 1, a: i === 0 ? 1 : Math.min(1, e * 4), rot: -(i * (360 / n)) * (1 - e) }; }
+  return { k: 1, a: 1, rot: 0 };
+}
+
+/** Annular wedge with constant-width gaps (as wheel.rs draws it), centred on 0,0, clockwise from the top. */
+function wedgeD(i: number, n: number, rIn: number, rOut: number, gap: number): string {
+  const step = 360 / n, mid = i * step, half = step / 2, d = gap / 2;
+  const off = (r: number) => (Math.asin(Math.min(1, d / r)) * 180) / Math.PI;
+  const pt = (r: number, deg: number) => { const a = (deg * Math.PI) / 180; return `${(r * Math.sin(a)).toFixed(2)} ${(-r * Math.cos(a)).toFixed(2)}`; };
+  const [a0, a1] = [mid - half + off(rOut), mid + half - off(rOut)];
+  const [b0, b1] = [mid - half + off(rIn), mid + half - off(rIn)];
+  return `M${pt(rOut, a0)} A${rOut} ${rOut} 0 0 1 ${pt(rOut, a1)} L${pt(rIn, b1)} A${rIn} ${rIn} 0 0 0 ${pt(rIn, b0)} Z`;
+}
+
+const SVGNS = "http://www.w3.org/2000/svg";
+interface MiniWheel { el: SVGSVGElement; play: () => void; rest: () => void }
+function miniWheel(anim: () => MenuAnim, ms: () => number): MiniWheel {
+  const n = 5;
+  const svg = document.createElementNS(SVGNS, "svg");
+  svg.setAttribute("viewBox", "-50 -50 100 100");
+  const whole = document.createElementNS(SVGNS, "g");
+  const slices: SVGGElement[] = [];
+  for (let i = 0; i < n; i++) {
+    const g = document.createElementNS(SVGNS, "g");
+    const p = document.createElementNS(SVGNS, "path");
+    p.setAttribute("d", wedgeD(i, n, 17, 45, 3.2));
+    if (i === 1) p.classList.add("hot");
+    const dot = document.createElementNS(SVGNS, "circle");
+    const a = ((i * 360) / n) * (Math.PI / 180);
+    dot.setAttribute("cx", (31 * Math.sin(a)).toFixed(2));
+    dot.setAttribute("cy", (-31 * Math.cos(a)).toFixed(2));
+    dot.setAttribute("r", "3.2");
+    g.append(p, dot);
+    whole.append(g);
+    slices.push(g);
+  }
+  const hub = document.createElementNS(SVGNS, "circle");
+  hub.setAttribute("r", "13.5");
+  hub.classList.add("hub");
+  whole.append(hub);
+  svg.append(whole);
+  let raf = 0, t0 = 0;
+  const pose = (age: number) => {
+    const a = anim(), d = ms(), on = draft.appearance.animations;
+    const [op, sc] = on ? openWindow(a, d, age) : [1, 1];
+    whole.setAttribute("transform", `scale(${sc.toFixed(4)})`);
+    whole.setAttribute("opacity", op.toFixed(3));
+    slices.forEach((g, i) => {
+      const s = on ? openSlice(a, d, age, i, n) : { k: 1, a: 1, rot: 0 };
+      g.setAttribute("transform", `rotate(${s.rot.toFixed(2)}) scale(${s.k.toFixed(4)})`);
+      g.setAttribute("opacity", s.a.toFixed(3));
+    });
+  };
+  const frame = (t: number) => {
+    if (!t0) t0 = t;
+    const age = t - t0;
+    pose(age);
+    if (age < ms() + 40) raf = requestAnimationFrame(frame); else { raf = 0; pose(1e6); }
+  };
+  const play = () => { cancelAnimationFrame(raf); t0 = 0; pose(0); raf = requestAnimationFrame(frame); };
+  const rest = () => { cancelAnimationFrame(raf); raf = 0; pose(1e6); };
+  rest();
+  return { el: svg, play, rest };
+}
+
+let animSync: () => void = () => {};
+let animIntro: () => void = () => {};
+/** Animation tiles (each a mini wheel that plays on hover and when picked) + the duration slider. */
+function animRows(): HTMLElement[] {
+  const ap = draft.appearance;
+  const cur = () => (ANIMS.some(([k]) => k === ap.menu_anim) ? ap.menu_anim : "petals") as MenuAnim;
+  const dur = () => Number(ap.menu_anim_ms) || 260;
+  const tiles = el("div", "atiles ctl");
+  const minis: Record<string, MiniWheel> = {};
+  for (const [k, name, hint] of ANIMS) {
+    const t = el("button", "atile" + (cur() === k ? " on" : ""));
+    const m = miniWheel(() => k, dur);
+    minis[k] = m;
+    t.append(m.el, el("b", "", name), el("span", "", hint));
+    t.addEventListener("pointerenter", () => m.play());
+    t.onclick = () => {
+      ap.menu_anim = k;
+      tiles.querySelectorAll(".atile").forEach((x) => x.classList.toggle("on", x === t));
+      m.play();
+      commit(true);
+    };
+    tiles.append(t);
+  }
+  let replay: number | undefined;
+  const len = sliderRow("Duration", "How long the wheel and tag menu take to open. Short feels snappy; long shows off the motion.",
+    { min: 100, max: 600, step: 10, value: dur(), fmt: ms, onInput: (v) => { ap.menu_anim_ms = v; clearTimeout(replay); replay = window.setTimeout(() => minis[cur()].play(), 160); } });
+  const pick = row("Opening animation", "How the wheel and the tag menu appear. Hover a tile to preview it (needs Animations).", tiles, { stack: true });
+  const sync = () => { const off = !ap.animations; tiles.classList.toggle("off", off); len.s.disable(off); pick.classList.toggle("dis", off); };
+  sync();
+  animSync = sync;
+  animIntro = () => minis[cur()].play();
+  return [pick, len.row];
+}
+
 function buildAppearance() {
   const mk = (d: ADef) => {
     const [k, label, hint, min, max, step, unit] = d;
     const r = sliderRow(label, hint, { min, max, step, value: Number(draft.appearance[k] ?? 0), fmt: (v) => `${v} ${unit}`, onInput: (v) => { draft.appearance[k] = v; } });
     return r.row;
   };
+  // cursor glow: on/off, then strength and follow delay (dimmed while off)
+  function glowRows(): HTMLElement[] {
+    const sl = [GLOW, GLOW_LAG].map((d) => {
+      const [k, label, hint, min, max, step, unit] = d;
+      return sliderRow(label, hint, { min, max, step, value: Number(draft.appearance[k] ?? 0), fmt: (v) => `${v} ${unit}`, onInput: (v) => { draft.appearance[k] = v; } });
+    });
+    const sync = () => sl.forEach((r) => r.s.disable(draft.appearance.cursor_glow_on === false));
+    const on = row("Cursor glow", "A subtle light in the glass colours that follows the pointer (windows, wheel and tag menu).",
+      toggle(draft.appearance.cursor_glow_on !== false, (v) => { draft.appearance.cursor_glow_on = v; sync(); }));
+    sync();
+    return [on, ...sl.map((r) => r.row)];
+  }
   // glass colours: three round swatches + a gradient preview
   const sws = el("div", "swatches ctl");
   const inputs: HTMLInputElement[] = [];
@@ -449,9 +607,10 @@ function buildAppearance() {
   panes.appearance.append(
     ...group("Everywhere",
       row("Glass colours", "The sheen on panels, the wheel and the tag menu.", sws, { stack: true }),
-      mk(SHEEN), mk(GLOW),
+      mk(SHEEN), ...glowRows(),
       row("Hover and selection colour", "Wheel highlight, selected items and switches.", hov),
-      row("Animations", "Turn off for instant, motion-free UI.", toggle(draft.appearance.animations, (v) => (draft.appearance.animations = v)))),
+      row("Animations", "Turn off for instant, motion-free UI.", toggle(draft.appearance.animations, (v) => { draft.appearance.animations = v; animSync(); }))),
+    ...group("Menu animation", ...animRows()),
     ...group("Gallery and settings windows", ...WIN_LOOK.map(mk), ...UI_LOOK.map(mk)),
     ...group("Wheel, tag menu and note", pv, ...NATIVE_LOOK.map(mk)),
     ...group("Wheel shape", ...WHEEL_LOOK.map(mk)),
@@ -538,11 +697,7 @@ function refreshPreview() {
 }
 
 window.addEventListener("beforeunload", () => { if (pending) invoke("settings_save", { new: draft }); });
-$("appBtn").addEventListener("click", () => {
-  const on = tabBtns.appearance.style.display === "none";
-  showAppearanceTab(on);
-  if (on) select("appearance");
-});
+$("appBtn").addEventListener("click", () => showAdvanced(!$("appBtn").classList.contains("on")));
 
 async function init() {
   const d = await invoke<Dto>("settings_get");
@@ -555,9 +710,9 @@ async function init() {
   buildRecording();
   buildGeneral();
   buildAppearance();
-  let showApp = false;
-  try { showApp = localStorage.getItem("stash.settings.appearance") === "1"; } catch { /* storage unavailable */ }
-  showAppearanceTab(showApp);
+  let showAdv = false;
+  try { showAdv = (localStorage.getItem("stash.settings.advanced") ?? localStorage.getItem("stash.settings.appearance")) === "1"; } catch { /* storage unavailable */ }
+  showAdvanced(showAdv);
   select("capture");
   // the window is created hidden: show it once this first frame is ready, then play the entrance
   // (title drops in, the tab bar pops, groups cascade, footer rises)

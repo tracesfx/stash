@@ -27,8 +27,43 @@ pub struct Style {
     pub wheel_gap: f32,
     pub wheel_opacity: f32,
     pub animations: bool,
-    /// Cursor glow strength 0..1 (0 = off).
+    /// Cursor glow strength 0..1 (0 = off) and follow delay (time constant, ms).
     pub glow: f32,
+    pub glow_lag: f32,
+    /// How the wheel and tag menu open, and how long that takes (ms). Ignored when `animations` is off.
+    pub anim: OpenAnim,
+    pub anim_ms: f32,
+}
+
+/// Opening animation of the wheel and the tag menu (Appearance > Menu animation). Drawn by `gfx::open_window`
+/// (whole menu) and `gfx::open_slice` (each slice); settings.ts mirrors the curves for its live preview.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OpenAnim {
+    /// Slices pop in one after another with a small overshoot (the M6 look).
+    Petals,
+    /// A soft fade.
+    Fade,
+    /// Grows from smaller with a long, smooth ease-out.
+    Zoom,
+    /// Springs in past full size and settles.
+    Bounce,
+    /// Turns into place while it grows.
+    Swirl,
+    /// Slices start stacked at the top and fan out clockwise.
+    Fan,
+}
+
+impl OpenAnim {
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "fade" => Self::Fade,
+            "zoom" => Self::Zoom,
+            "bounce" => Self::Bounce,
+            "swirl" => Self::Swirl,
+            "fan" => Self::Fan,
+            _ => Self::Petals,
+        }
+    }
 }
 
 /// Neutral, cool glass sheen (the reference picks are mostly colourless; colour comes from what is behind).
@@ -89,7 +124,10 @@ pub fn style_for(cfg: &Config) -> Style {
         wheel_gap: a.wheel_gap as f32,
         wheel_opacity: a.wheel_opacity as f32 / 100.0,
         animations: a.animations,
-        glow: a.cursor_glow as f32 / 100.0,
+        glow: if a.cursor_glow_on { a.cursor_glow as f32 / 100.0 } else { 0.0 },
+        glow_lag: a.cursor_glow_lag as f32,
+        anim: OpenAnim::parse(&a.menu_anim),
+        anim_ms: a.menu_anim_ms.clamp(100, 600) as f32,
     }
 }
 

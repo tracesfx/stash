@@ -106,8 +106,16 @@ pub fn run() {
             gallery::gallery_copy,
             gallery::gallery_import,
             gallery::gallery_tag,
-            gallery::gallery_view_load,
-            gallery::gallery_view_save,
+            gallery::gallery_favorite,
+            gallery::gallery_drag_icon,
+            gallery::gallery_fav_tags,
+            gallery::gallery_set_fav_tags,
+            gallery::gallery_trash_list,
+            gallery::gallery_purge,
+            gallery::canvas_list,
+            gallery::canvas_load,
+            gallery::canvas_save,
+            gallery::canvas_delete,
             gallery::gallery_backfill,
             gallery::gallery_export,
             gallery::gallery_open_path,
@@ -137,6 +145,14 @@ pub fn run() {
             let hotkey_ok = hotkeys::register(app.handle());
             settings::apply_autostart_on_start(app.handle());
             tray::build(app.handle(), hotkey_ok)?;
+            // empty expired trash in the background (also done whenever the Trash tab opens)
+            {
+                let (root, days) = {
+                    let c = app.state::<AppState>().cfg();
+                    (c.library_path.clone(), c.trash_days)
+                };
+                std::thread::spawn(move || gallery::purge_expired(&root, days));
+            }
             // coalesce bursts (a capture + its tags) into one event for the gallery
             let h = app.handle().clone();
             let pending = std::sync::Arc::new(AtomicBool::new(false));

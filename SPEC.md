@@ -38,13 +38,17 @@ Mobile, cloud accounts/sync service, collaboration, always-on recording/replay b
 
 The wheel's wedges are user-configurable (Settings > Radial wheel; config `wheel_actions`, minimum 2). Possible actions, in fixed clockwise order: Region, Window, Screen, Selection, Clipboard, Note, Record, Pause, Gallery, Settings (the Whiteboard action is removed in M6; configs that still list `board` drop it on load).
 
-**Tag radial (replaces the confirmation popup, M6):** the capture is already on disk before anything appears. Within ~50 ms of the mouse release, a small native radial opens at the release point: the capture's thumbnail in the centre (this is the confirmation), up to 6 tag wedges ranked by recency + frequency, and one Caption wedge.
-- Click a wedge = add that tag and close; Ctrl+click = add and keep open for another tag.
+**Tag radial (replaces the confirmation popup, M6; centre reworked in M8):** the capture is already on disk before anything appears. Within ~50 ms of the mouse release, a small native radial opens at the release point: up to 6 tag wedges ranked by recency + frequency, a centre disc split into **Star** (top half: adds the item to Favourites, toggles) and **Discard** (bottom half: cancels the save, the capture's files are deleted for good), and the tag / caption pill below. The centre no longer previews the capture; when the radial closes a native toast confirms the outcome instead ("Saved" with the thumbnail, the tags added and where it came from; "Saved to Favourites"; or "Discarded").
+- Click a wedge (or press its number, 1-6, while nothing is typed) = add that tag and close; Ctrl+click / Ctrl+number = add and keep open for another tag. Clicking an applied tag again removes it.
+- The ring shows 6 of up to 24 tags; the mouse wheel turns it one tag at a time (the ring rotates into place). The meta line under the pill says so on hover.
+- Each tag has its own colour (stable hash of its name), shown as a band along the outer edge of its slice.
+- Image captures glow through the glass: the thumbnail's centre square (cover crop, never stretched), shrunk, blurred and drawn at 30 % under the labels.
 - Typing filters the tags; Enter applies the match or creates a new tag. Tab (or the Caption wedge) switches the field to caption; Enter saves it.
-- No timer and no countdown: it stays while the pointer is on it (ring, pill or the gap between) and fades out ~150 ms after the pointer moves off; the item stays saved untagged. While a tag or caption is being typed it stays regardless. Esc, right-click or clicking elsewhere closes it. Safety net: closes after 12 s with no pointer movement and nothing typed.
+- No timer and no countdown: it stays while the pointer is on it (ring, pill or the gap between); 300 ms after the pointer moves off it fades out over ~260 ms, and moving back onto it (even mid-fade) fades it back in; the item stays saved untagged. While a tag or caption is being typed it stays regardless. Esc, right-click or clicking elsewhere closes it. Safety net: closes after 12 s with no pointer movement and nothing typed.
 - Appears after Region, Window, Screen, Selection, Clipboard and finished recordings; not after notes (tagged inline). With no tags yet it shows just the input and the Caption wedge.
 - Budget: tagging an item with an existing tag takes < 1.5 s, a new tag < 3 s.
-- Writes go through `library::update_sidecar`. Errors and Pause messages use a small native toast.
+- Writes go through `library::update_sidecar` (`library::set_favorite`, `library::discard` holds the same lock so a late tag write cannot resurrect a discarded sidecar). Errors and Pause messages use a small native toast.
+- Opening animation (Settings › Appearance › Menu animation, shared with the wheel): Petals (default; slices pop in one by one), Fade, Zoom, Bounce, Swirl, Fan, with a duration of 100-600 ms (default 260). Curves live in `gfx::open_window` / `gfx::open_slice` and are mirrored in settings.ts for the live preview tiles.
 
 **Text input:** the radial and the quick note use a native text field drawn with tiny-skia. It must support the standard editing keys: Ctrl+Backspace/Delete word-delete, Ctrl+A/C/X/V/Z, arrows, Ctrl+arrows, Home/End and Shift-select. This is an acceptance test for M6. Web windows (search, settings, gallery fields) keep native web inputs.
 
@@ -54,7 +58,8 @@ Every item auto-records metadata (see §5): timestamp, source window title + pro
 - Root folder (default `%USERPROFILE%\Pictures\Stash`, configurable, may be a synced folder). Layout: `YYYY-MM/<id>.<ext>` + `<id>.json` sidecar.
 - `id` = `YYYYMMDD-HHMMSS-xxxx` (sortable, collision-safe across machines).
 - Types: `image`, `text`, `link`, `file`.
-- Sidecar schema v1 (`schema` field versioned; unknown fields preserved on rewrite): `{ schema, id, type, created, modified, method, caption, tags:[], source:{title,process,exe_path?,url?}, file:{name,ext,bytes,sha256,mime,original_path?}, image:{w,h,monitor,scale,rect}, text:{chars?}, palette:[], ocr?, rating?, board? }`. Metadata is written at capture time; editing caption/tags updates `modified`.
+- Sidecar schema v1 (`schema` field versioned; unknown fields preserved on rewrite): `{ schema, id, type, created, modified, method, caption, tags:[], source:{title,process,exe_path?,url?}, file:{name,ext,bytes,sha256,mime,original_path?}, image:{w,h,monitor,scale,rect}, text:{chars?}, palette:[], ocr?, rating?, favorite?, board? }`. Metadata is written at capture time; editing caption/tags updates `modified`.
+- `favorite: true` marks a starred item (Favourites tab); the field is removed when un-starred.
 - `board` is legacy (M5): the gallery reads a non-empty `board` as an extra tag and no longer writes it. Old `<id>.board` whiteboard scene files are left on disk untouched and ignored. Their PNG is a normal image item.
 - Derived, disposable caches live in dot-folders (`.thumbs/`, `.views/` for Canvas layouts). Deleting them loses nothing but layout or speed.
 - In-memory index built from sidecars at gallery open (folder watcher for external changes). No required database; an optional disposable SQLite cache may be added past ~20k items.
@@ -64,7 +69,6 @@ Every item auto-records metadata (see §5): timestamp, source window title + pro
 Opened from tray click or wheel wedge C7; created on demand, destroyed on close.
 - Lazy thumbnails cached in `.thumbs/`. Instant search over caption, tags, source title/URL, OCR text and type.
 - Item actions: copy image, **drag out** into Notion/Figma/Miro/Explorer, open source URL, edit tags/caption, delete (with undo), reveal in Explorer, export.
-- **Shuffle view:** full-screen random item, one key for next.
 
 **Organisation (M7).** The library is mostly untagged notes, so navigation must work with no metadata:
 - **Tabs:** Notes · Visuals · All. Notes is a readable list showing each note's source page title (e.g. the YouTube video). Visuals is a masonry grid of images, clips and files.
@@ -78,7 +82,29 @@ Opened from tray click or wheel wedge C7; created on demand, destroyed on close.
 - New captures arrive through a Rust `library-changed` event and slide into Today, instead of a reload on focus. The viewer zooms open from its card.
 - 150-220 ms, transform/opacity only. Honours the Animations setting and Windows reduced motion.
 
-**Canvas view (M7).** A Grid/Canvas toggle for the current scope (a day, a tag or any filter). Canvas auto-arranges the items: notes as sticky notes, images at their real aspect ratio, clustered by source page.
+**Tabs (M7b, Favourites added in M8).** Notes · Visuals · All · Favourites · Canvases · Trash. One continuous masonry for every item tab: a day label sits on top of its day's first item and the rest flow into the shortest column, so short days share rows and short items stack; a floating pill shows the day you are scrolled to. Notes use wider columns (min 340 px) and fill the window. Mouse-wheel scrolling is eased (touchpads stay native).
+
+**Favourites (M8).** Favourites cannot be deleted (trash skips them, also in `gallery_delete`; the radial's Discard is disabled while starred): un-star first.
+
+**Favourites, starring (M8).** Star an item from the star on its card (hover; always shown on favourites), the detail panel, the selection bar, the F key, or the tag radial's centre. Favourite cards carry a faint holographic sheen that leans toward the pointer; a selected favourite gets a white glow instead of the accent ring.
+
+**Selection (M8).** No select checkmarks: click, Ctrl/Shift-click, marquee and arrow keys select. The detail panel floats over the right side of the grid, slides in and never re-flows it. It is see-through and click-through (only its fields take the pointer) and fades further while the pointer is over something underneath, so cards below can be seen and selected. It holds no action buttons (the selection bar has them; the File row reveals the file in Explorer). Deleting any item burns it away: it catches at a random corner, a point on an edge, or two points, with a smooth charred, glowing rim, embers and smoke (up to 10 cards at once; more just shrink out).
+
+**Search (M8).** The rail has Favourite tags, Collections and Library. Typing in search suggests tags, colours and apps for the word being typed; ↑/↓ and Enter/Tab (or a click) turn the pick into a filter chip in the header and clear the search bar (`color:blue` / `app:chrome` still work typed). Image cards no longer show a palette strip.
+
+**Favourite tags (M8).** A star on tag tiles, tag rows and the active tag chip pins the tag to a "Favourite tags" section at the top of the rail. Stored in the library (`<library>/.tags.json`, `favorites: []`), so it syncs with it and settings autosave cannot overwrite it.
+
+**View menu (M8).** Header button: card size (140-480 px minimum width, also Ctrl + mouse wheel over the grid), spacing (4-28 px), square tiles, captions, note sources, day labels; Reset. Remembered per PC (localStorage `stash.gallery.view`).
+
+**Selection bar (M8).** Icon buttons with tooltips (favourite, tag, select all, export, trash, clear); only Create canvas keeps its label. "Add to canvas" is gone: a canvas has an **Add** button that opens a picker of library items not on it yet (search, pick, Add N); new items go into free space. A selected card's own trash button acts on the whole selection. Toasts sit above the selection bar while it shows.
+
+**Burn (M8).** Every delete burns: gallery cards (trash, delete forever, empty trash), canvas items (remove from canvas) and canvas tiles (delete canvas). Everything deleted at once burns together (up to 60 on screen; the noise grid gets coarser when many burn). After a burn the grid re-arranges only once every running burn has finished. Pictures in the viewer and the panel preview drag the item's file (native drag), never the preview image; the drag picture is a small 96 px icon (`gallery_drag_icon`, cached as `.thumbs/<id>.drag.png`). Imported pictures without a stored size get it from the file header at scan time, so the first layout is final.
+
+**Motion (M8).** Re-arranging glides in 420 ms with an ease-in-out curve. A layout that lands while tiles are still animating continues them from where they are on screen (position, scale, opacity) instead of letting them finish and snap; the grid keeps a stable scrollbar gutter so the scrollbar appearing never re-flows it.
+
+**Trash (M7b).** Deleted items move to `.trash` (sidecar gets `trashed`); the Trash tab lists them by deletion day with Restore / Delete forever / Empty trash. Items are removed for good after `trash_days` (Settings › General, default 30, 0 = never), checked at startup and when the tab opens.
+
+**Canvases (M7b, replaces the per-scope Canvas view).** Select items, press the glowing **Create canvas** button (or "Add to canvas…") and the canvas is saved under a name in the Canvases tab (`.canvases/<id>.json`). The editor shows its name (editable) and a save indicator ("All changes saved" / "Saving…"); the last open canvas reopens when you come back to the tab. Canvas auto-arranges the items once: notes as sticky notes, images at their real aspect ratio, clustered by source page (no text labels on the canvas, only the items). Delete removes items from the canvas, never from the library.
 - Pan, zoom and drag to rearrange (no drawing tools). New items are placed in free space.
 - Moved positions persist in `.views/<scope>.json`. Export to PNG saves into the library.
 
@@ -89,8 +115,10 @@ Settings (redesigned in M6):
 - **Appearance:** glass colours and knobs are in a collapsed "Appearance" section, hidden by default.
 - **Save model:** no Save or Cancel buttons. Every change is saved and applied as it is made (sliders debounced ~220 ms; the library folder only when its field is committed), confirmed by a small "Saved" tick in the footer. Esc closes the window.
 - **Text size:** all web font sizes are rem-based, so the Text size knob scales every label, hint, keycap and count together.
+- **Advanced switch** (footer): off shows only the basic settings (shortcut, tag menu, wheel actions, audio, library folder, empty-trash delay, start with Windows); on adds everything else and the Appearance tab.
 - **Appearance groups:** Everywhere (glass colours, colour sheen, cursor glow, hover colour, animations) · Gallery and settings windows (blur, translucency, saturation, text size, corner roundness) · Wheel, tag menu and note (live preview, blur, translucency, saturation) · Wheel shape. Window and native glass have separate knobs (config `win_*` vs `glass_*`). No presets (removed; may return later).
-- **Cursor glow** (0-100 %, default 35): a soft light in the glass colours that follows the pointer, in the web windows (one fixed element moved by transform) and on the wheel and tag radial (`gfx::cursor_glow`).
+- **Cursor glow** (on/off, strength 0-100 % default 30, follow delay 0-400 ms default 90): a subtle light in the glass colours that eases after the pointer and sits on the arrow's body rather than its tip (`gfx::GLOW_NUDGE`), in the web windows (one fixed element moved by transform) and on the wheel and tag radial (`gfx::cursor_glow`, `glow_follow`).
+- **Menu animation** (needs Animations): how the wheel and tag radial open: Petals (default, slices grow in one after another), Fade, Zoom, Bounce, Swirl or Fan, and its duration (100-600 ms, default 260). Each tile in Settings previews its animation on hover. Config `appearance.menu_anim` / `menu_anim_ms` (style_rev 4 maps the old Slice pop-in switch: off = Fade).
 - **Blur:** 0 = clear (the sharp screen shows through) on both kinds of glass; there is no separate Transparent switch (style_rev 3 migrates it to blur 0). Translucency only thins the dark tint.
 - **Window glass (backdrop.rs):** gallery and settings draw their own backdrop with Windows.UI.Composition: a visual behind the transparent web view filled with the DWM host backdrop, run through our saturation and extra blur. DWM delivers that backdrop already blurred (~30 px, the Acrylic look) and there is no API for the sharp content short of live screen capture, so blur 0-30 cross-fades the frosted layer over the sharp desktop and 30-60 stacks a real Gaussian blur on top. Changes apply live to the open window. Falls back to Acrylic if composition fails or Windows transparency effects are off. A true weak blur would need Windows.Graphics.Capture of the screen behind the window (not built).
 - **Native glass** (wheel, tag menu, note, toasts) blurs a grab of the screen itself, so any blur radius is exact; the Appearance tab shows it live over a desktop snapshot taken when settings opens.

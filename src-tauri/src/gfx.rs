@@ -209,6 +209,141 @@ pub fn glass_fill(pm: &mut Pixmap, path: &Path, bounds: Rect, bg: Option<&Pixmap
     }
 }
 
+/// The arrow cursor's hotspot is its tip; the eye reads the arrow's body as "the cursor", so the glow is centred
+/// a little down and right of the hotspot (px at 100 % scale).
+pub const GLOW_NUDGE: (f32, f32) = (4.0, 7.0);
+
+/// Eases a glow position toward the cursor (Appearance > Cursor glow > Follow delay). Returns true while moving.
+pub fn glow_follow(pos: &mut (f32, f32), target: (f32, f32), dt_ms: f32, style: &Style) -> bool {
+    if style.glow_lag < 1.0 || pos.0 < -999.0 {
+        let moved = *pos != target;
+        *pos = target;
+        return moved;
+    }
+    let a = 1.0 - (-dt_ms.max(0.0) / style.glow_lag).exp();
+    pos.0 += (target.0 - pos.0) * a;
+    pos.1 += (target.1 - pos.1) * a;
+    if (target.0 - pos.0).abs() + (target.1 - pos.1).abs() < 0.3 {
+        *pos = target;
+    }
+    true
+}
+
+// ---------- opening animations (Appearance > Menu animation) ----------
+// Every curve ends exactly at rest (scale 1, opacity 1, no rotation) at `anim_ms`, so the last frame never jumps.
+// settings.ts has a copy of these curves for its live preview: keep them in step.
+
+fn ease_out_quart(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(4)
+}
+fn ease_out_quint(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(5)
+}
+/// Smoothstep: gentle start and end.
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+/// Ease-out-back: a small overshoot past 1.
+fn back(t: f32, c1: f32) -> f32 {
+    let u = t.clamp(0.0, 1.0) - 1.0;
+    1.0 + (c1 + 1.0) * u * u * u + c1 * u * u
+}
+/// Damped spring: overshoots ~13 %, dips back ~2 %, settles (forced to 1 at the end).
+fn spring(t: f32) -> f32 {
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let t = t.max(0.0);
+    1.0 - (-6.0 * t).exp() * (3.0 * std::f32::consts::PI * t).cos()
+}
+
+/// The whole menu `age_ms` after opening: (opacity, scale about the centre).
+pub fn open_window(style: &Style, age_ms: f32) -> (f32, f32) {
+    use crate::theme::OpenAnim::*;
+    if !style.animations {
+        return (1.0, 1.0);
+    }
+    let d = style.anim_ms.max(1.0);
+    let t = |f: f32| (age_ms / (d * f)).clamp(0.0, 1.0);
+    match style.anim {
+        Petals => {
+            let k = ease_out(t(0.55));
+            (k, 0.9 + 0.1 * k)
+        }
+        Fade => {
+            let k = smooth(t(1.0));
+            (k, 0.985 + 0.015 * k)
+        }
+        Zoom => (ease_out(t(0.6)), 0.72 + 0.28 * ease_out_quint(t(1.0))),
+        Bounce => (ease_out(t(0.3)), 0.5 + 0.5 * spring(t(1.0))),
+        Swirl => (ease_out(t(0.6)), 0.8 + 0.2 * ease_out_quart(t(1.0))),
+        Fan => (ease_out(t(0.35)), 0.95 + 0.05 * ease_out(t(1.0))),
+    }
+}
+
+/// One slice of the opening animation: scale about the centre, opacity, rotation (degrees, clockwise).
+#[derive(Clone, Copy)]
+pub struct SliceAnim {
+    pub k: f32,
+    pub a: f32,
+    pub rot: f32,
+}
+const SLICE_REST: SliceAnim = SliceAnim { k: 1.0, a: 1.0, rot: 0.0 };
+
+/// Slice `i` of `n`, `age_ms` after opening.
+pub fn open_slice(style: &Style, age_ms: f32, i: usize, n: usize) -> SliceAnim {
+    use crate::theme::OpenAnim::*;
+    if !style.animations {
+        return SLICE_REST;
+    }
+    let d = style.anim_ms.max(1.0);
+    let t = (age_ms / d).clamp(0.0, 1.0);
+    match style.anim {
+        Petals => {
+            // slices start one after another (the whole ring within half the time) and grow from 70 %
+            let pop = 0.5 * d;
+            let step = (0.5 * d / (n.max(2) - 1) as f32).min(22.0 * d / 240.0);
+            let t = ((age_ms - i as f32 * step) / pop).clamp(0.0, 1.0);
+            if t <= 0.0 {
+                return SliceAnim { k: 0.7, a: 0.0, rot: 0.0 };
+            }
+            SliceAnim { k: 0.7 + 0.3 * back(t, 1.3), a: ease_out(t * 1.6), rot: 0.0 }
+        }
+        Swirl => SliceAnim { k: 1.0, a: 1.0, rot: -50.0 * (1.0 - ease_out_quart(t)) },
+        Fan => {
+            // all slices start on top of the first one and spread clockwise to their places
+            let e = ease_out_quart(t);
+            let step = 360.0 / n.max(1) as f32;
+            SliceAnim { k: 1.0, a: if i == 0 { 1.0 } else { (e * 4.0).min(1.0) }, rot: -(i as f32 * step) * (1.0 - e) }
+        }
+        Fade | Zoom | Bounce => SLICE_REST,
+    }
+}
+
+/// How long the opening animation runs (ms), so callers know when to stop repainting for it.
+pub fn open_total_ms(style: &Style) -> f32 {
+    if style.animations {
+        style.anim_ms
+    } else {
+        0.0
+    }
+}
+
+/// A slice path posed for its opening animation (rotated, then scaled about (cx, cy)).
+pub fn pose_slice(p: &Path, s: SliceAnim, cx: f32, cy: f32) -> Option<Path> {
+    let p = if s.rot.abs() > 1e-3 { p.clone().transform(Transform::from_rotate_at(s.rot, cx, cy))? } else { p.clone() };
+    scale_about(&p, s.k, cx, cy)
+}
+
+/// Scales a path about (cx, cy).
+pub fn scale_about(p: &Path, k: f32, cx: f32, cy: f32) -> Option<Path> {
+    if (k - 1.0).abs() < 1e-4 {
+        return Some(p.clone());
+    }
+    p.clone().transform(Transform::from_row(k, 0.0, 0.0, k, cx * (1.0 - k), cy * (1.0 - k)))
+}
+
 /// Cursor glow (Appearance > Cursor glow): a soft light in the glass colours at (x, y), clipped to `path`.
 pub fn cursor_glow(pm: &mut Pixmap, path: &Path, x: f32, y: f32, radius: f32, style: &Style) {
     let k = style.glow.clamp(0.0, 1.0);
@@ -219,10 +354,19 @@ pub fn cursor_glow(pm: &mut Pixmap, path: &Path, x: f32, y: f32, radius: f32, st
     let Some(mut mask) = Mask::new(w, h) else { return };
     mask.fill_path(path, FillRule::Winding, true, Transform::identity());
     let (a, b) = (style.glass[0], style.glass[1]);
+    // Gaussian-shaped falloff (exp(-4.2 t²)) over many stops, so the glow has no visible edge
     let stops = vec![
-        GradientStop::new(0.0, Color::from_rgba8(a[0], a[1], a[2], (190.0 * k) as u8)),
-        GradientStop::new(0.4, Color::from_rgba8(b[0], b[1], b[2], (70.0 * k) as u8)),
-        GradientStop::new(1.0, Color::from_rgba8(b[0], b[1], b[2], 0)),
+        GradientStop::new(0.0, Color::from_rgba8(a[0], a[1], a[2], (70.0 * k) as u8)),
+        GradientStop::new(0.1, Color::from_rgba8(a[0], a[1], a[2], (67.0 * k) as u8)),
+        GradientStop::new(0.2, Color::from_rgba8(a[0], a[1], a[2], (58.8 * k) as u8)),
+        GradientStop::new(0.3, Color::from_rgba8(a[0], a[1], a[2], (47.3 * k) as u8)),
+        GradientStop::new(0.4, Color::from_rgba8(a[0], a[1], a[2], (34.9 * k) as u8)),
+        GradientStop::new(0.5, Color::from_rgba8(b[0], b[1], b[2], (23.6 * k) as u8)),
+        GradientStop::new(0.6, Color::from_rgba8(b[0], b[1], b[2], (14.6 * k) as u8)),
+        GradientStop::new(0.7, Color::from_rgba8(b[0], b[1], b[2], (8.3 * k) as u8)),
+        GradientStop::new(0.8, Color::from_rgba8(b[0], b[1], b[2], (4.3 * k) as u8)),
+        GradientStop::new(0.9, Color::from_rgba8(b[0], b[1], b[2], (2.0 * k) as u8)),
+        GradientStop::new(1.0, Color::from_rgba8(b[0], b[1], b[2], (0.9 * k) as u8)),
     ];
     let Some(sh) = RadialGradient::new(Point::from_xy(x, y), 0.0, Point::from_xy(x, y), radius, stops, SpreadMode::Pad, Transform::identity()) else {
         return;
