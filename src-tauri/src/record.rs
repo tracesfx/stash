@@ -20,7 +20,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::winutil::{MonitorDesc, SourceInfo};
-use crate::{library, popup, tray, AppState};
+use crate::{library, tray, AppState};
 
 const RATE: u32 = 48_000;
 static STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
@@ -41,7 +41,7 @@ pub struct Recorded {
     pub w: u32,
     pub h: u32,
     pub secs: f64,
-    /// First frame, top-down RGB (popup thumbnail).
+    /// First frame, top-down RGB (feedback thumbnail).
     pub first: Vec<u8>,
 }
 
@@ -70,16 +70,19 @@ pub fn start(app: &AppHandle, rect: RECT, source: SourceInfo, monitor: MonitorDe
             Ok(rec) => {
                 tracing::info!("recorded {}x{} {:.1}s in {} ms wall", rec.w, rec.h, rec.secs, t0.elapsed().as_millis());
                 match library::save_video(&app.state::<AppState>().cfg().library_path, &tmp, &rec, &source, &monitor) {
-                    Ok(saved) => popup::show(&app, Some(saved.sidecar), saved.preview, saved.meta),
+                    Ok(saved) => crate::radial::show(
+                        &app,
+                        crate::radial::Request { sidecars: vec![saved.sidecar], preview: saved.preview, meta: saved.meta, source_hwnd: source.hwnd, frame: None },
+                    ),
                     Err(e) => {
                         tracing::error!("save clip: {e:#}");
-                        popup::notice(&app, "Saving clip failed — see log");
+                        crate::toast::notice(&app, "Saving clip failed — see log");
                     }
                 }
             }
             Err(e) => {
                 tracing::error!("record: {e:#}");
-                popup::notice(&app, "Recording failed — see log");
+                crate::toast::notice(&app, "Recording failed — see log");
             }
         }
         let _ = std::fs::remove_file(&tmp);

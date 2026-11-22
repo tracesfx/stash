@@ -3,7 +3,6 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use base64::Engine;
 use chrono::{Local, SecondsFormat};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{ExtendedColorType, ImageEncoder};
@@ -22,17 +21,24 @@ pub struct ImageMeta {
     pub rect: [i32; 4],
 }
 
-/// What the confirmation popup shows.
+/// Small RGBA thumbnail (straight alpha) for native feedback windows.
+pub struct Thumb {
+    pub rgba: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// What the tag radial / toast shows for a fresh capture.
+#[derive(Clone)]
 pub enum Preview {
-    Image(String), // PNG data URL
+    Image(std::sync::Arc<Thumb>),
     Text(String),
-    Notice(String),
 }
 
 pub struct Saved {
     pub sidecar: PathBuf,
     pub preview: Preview,
-    /// One-line description for the popup, e.g. "Region · 1115×628 · chrome".
+    /// One-line description, e.g. "Region · 1115×628 · chrome".
     pub meta: String,
 }
 
@@ -159,7 +165,7 @@ pub fn save_image(root: &Path, rgba: &[u8], w: u32, h: u32, meta: ImageMeta) -> 
     Ok(Saved { sidecar, preview: Preview::Image(thumb), meta })
 }
 
-/// Saves a recorded MP4 clip (kind "file"; the first frame is the popup thumbnail).
+/// Saves a recorded MP4 clip (kind "file"; the first frame is the feedback thumbnail).
 pub fn save_video(root: &Path, src: &Path, rec: &crate::record::Recorded, source: &SourceInfo, monitor: &MonitorDesc) -> Result<Saved> {
     let (thumb, _) = thumb_and_palette(&rec.first, rec.w, rec.h)?;
     let sidecar = put(
@@ -185,50 +191,6 @@ pub fn save_video(root: &Path, src: &Path, rec: &crate::record::Recorded, source
     )?;
     let meta = format!("Clip · {}×{} · {:.0}s{}", rec.w, rec.h, rec.secs, via(source));
     Ok(Saved { sidecar, preview: Preview::Image(thumb), meta })
-}
-
-/// Saves (or overwrites, when `existing` is a sidecar path) a whiteboard: PNG render + `<id>.board` scene JSON.
-pub fn save_board(root: &Path, existing: Option<&Path>, png: &[u8], scene: &str) -> Result<Saved> {
-    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).context("board png")?.to_rgb8();
-    let (w, h) = img.dimensions();
-    let (thumb, palette) = thumb_and_palette(img.as_raw(), w, h)?;
-    let source = SourceInfo::default();
-    let sidecar = if let Some(sc) = existing {
-        let v = read_json(sc)?;
-        let name = v["file"]["name"].as_str().context("sidecar has no file name")?.to_string();
-        let content = sc.with_file_name(&name);
-        write_atomic(&content.with_extension("board"), scene.as_bytes())?;
-        write_atomic(&content, png)?;
-        let (bytes, sha) = (std::fs::metadata(&content)?.len(), sha256_file(&content)?);
-        update_sidecar(sc, |v| {
-            v["file"]["bytes"] = json!(bytes);
-            v["file"]["sha256"] = json!(sha);
-            v["image"] = json!({ "w": w, "h": h });
-            v["palette"] = json!(palette);
-            if let Some(o) = v.as_object_mut() {
-                o.remove("ocr"); // re-indexed by the gallery backfill
-            }
-        })?;
-        sc.to_path_buf()
-    } else {
-        put(
-            root,
-            Item {
-                kind: "image",
-                ext: "png",
-                mime: "image/png",
-                method: "board",
-                source: &source,
-                original_path: None,
-                extra: json!({ "image": { "w": w, "h": h }, "palette": palette }),
-            },
-            |p| {
-                write_atomic(&p.with_extension("board"), scene.as_bytes())?;
-                write_atomic(p, png)
-            },
-        )?
-    };
-    Ok(Saved { sidecar, preview: Preview::Image(thumb), meta: format!("Board · {w}×{h}") })
 }
 
 fn is_url(s: &str) -> bool {
@@ -289,16 +251,16 @@ pub fn save_file(root: &Path, src: &Path, method: &str, source: &SourceInfo) -> 
     )?;
     let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let meta = format!("{} · {name}", method_label(method));
-    Ok(Saved { sidecar, preview: Preview::Text(format!("📄 {name}")), meta })
+    Ok(Saved { sidecar, preview: Preview::Text(name), meta })
 }
 
-/// Popup thumbnail (PNG data URL) and the dominant-colour palette, from one downscale.
-fn thumb_and_palette(rgb: &[u8], w: u32, h: u32) -> Result<(String, Vec<String>)> {
+/// Feedback thumbnail and the dominant-colour palette, from one downscale.
+fn thumb_and_palette(rgb: &[u8], w: u32, h: u32) -> Result<(std::sync::Arc<Thumb>, Vec<String>)> {
     let img = image::RgbImage::from_raw(w, h, rgb.to_vec()).context("thumb buffer")?;
-    let t = image::imageops::thumbnail(&img, 560, 340);
+    let t = image::imageops::thumbnail(&img, 320, 320);
     let palette = crate::palette::dominant(t.as_raw(), 5);
-    let png = encode_png(t.as_raw(), t.width(), t.height())?;
-    Ok((format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)), palette))
+    let rgba: Vec<u8> = t.as_raw().chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+    Ok((std::sync::Arc::new(Thumb { rgba, w: t.width(), h: t.height() }), palette))
 }
 
 static SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -316,4 +278,17 @@ pub fn update_sidecar(sidecar: &Path, f: impl FnOnce(&mut Value)) -> Result<()> 
 /// Sets the caption in an existing sidecar, preserving all other (even unknown) fields.
 pub fn set_caption(sidecar: &Path, caption: &str) -> Result<()> {
     update_sidecar(sidecar, |v| v["caption"] = Value::String(caption.to_string()))
+}
+
+/// Adds tags (case-insensitive de-dupe, existing order kept) to a sidecar.
+pub fn add_tags(sidecar: &Path, tags: &[String]) -> Result<()> {
+    update_sidecar(sidecar, |v| {
+        let mut cur: Vec<String> = v["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
+        for t in tags {
+            if !cur.iter().any(|c| c.eq_ignore_ascii_case(t)) {
+                cur.push(t.clone());
+            }
+        }
+        v["tags"] = json!(cur);
+    })
 }

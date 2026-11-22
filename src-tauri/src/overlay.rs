@@ -1,6 +1,6 @@
 //! Native Win32 snip overlay (webview is too slow to cold-start). Shows a dimmed frozen copy of the desktop;
-//! drag to select; returns the selected rect. Themed: accent border + corner brackets, a rounded size pill,
-//! and in Liquid Glass the dim is tinted with the configured glass colour.
+//! drag to select; returns the selected rect. Accent border + corner brackets, a rounded glass size pill, and
+//! a dim faintly tinted with the first glass colour.
 use std::ffi::c_void;
 use std::mem::size_of;
 
@@ -13,7 +13,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCaptu
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::gfx::{draw_text, text_width};
-use crate::theme::{Resolved, Style};
+use crate::theme::Style;
 use crate::winutil::Frame;
 
 const MIN_SIZE: i32 = 4;
@@ -23,7 +23,6 @@ struct State {
     w: i32,
     h: i32,
     scale: f32,
-    style: Style,
     orig_dc: HDC,
     dim_dc: HDC,
     back_dc: HDC,
@@ -81,13 +80,9 @@ pub fn select_region(frame: &Frame, style: Style, scale: f32) -> Option<RECT> {
         let n = (frame.w * frame.h) as usize;
         let src = frame.bgra.as_ptr() as *const u32;
         let (o, d) = (orig_bits as *mut u32, dim_bits as *mut u32);
-        // Liquid Glass: tint the dimmed backdrop a little with the first glass colour (BGRA packed)
-        let tint: u32 = if style.theme == Resolved::Glass {
-            let g = style.glass[0];
-            (g[2] as u32 / 9) << 16 | (g[1] as u32 / 9) << 8 | (g[0] as u32 / 9)
-        } else {
-            0
-        };
+        // tint the dimmed backdrop a little with the first glass colour (BGRA packed)
+        let g = style.glass[0];
+        let tint: u32 = ((g[2] as u32 / 12) << 16) | ((g[1] as u32 / 12) << 8) | (g[0] as u32 / 12);
         for i in 0..n {
             let px = *src.add(i);
             *o.add(i) = px;
@@ -102,7 +97,6 @@ pub fn select_region(frame: &Frame, style: Style, scale: f32) -> Option<RECT> {
             w: frame.w,
             h: frame.h,
             scale,
-            style,
             orig_dc,
             dim_dc,
             back_dc,
@@ -306,11 +300,7 @@ unsafe fn draw_pill(st: &State, dc: HDC, r: RECT, rw: i32, rh: i32) {
         let (pw, ph) = ((text_width(&text, px) + 24.0 * k).ceil() as u32, (26.0 * k).ceil() as u32);
         let Some(mut pm) = Pixmap::new(pw, ph) else { return };
 
-        let (bg, fg, rim): ([u8; 4], [u8; 3], [u8; 4]) = match st.style.theme {
-            Resolved::Dark => ([22, 22, 28, 232], [245, 245, 250], [255, 255, 255, 40]),
-            Resolved::Light => ([255, 255, 255, 240], [28, 28, 34], [0, 0, 0, 45]),
-            Resolved::Glass => ([0, 0, 0, 0], [255, 255, 255], [255, 255, 255, 140]),
-        };
+        let fg: [u8; 3] = [255, 255, 255];
         let rr = ph as f32 / 2.0;
         let mut pb = PathBuilder::new();
         let (x0, y0, x1, y1) = (0.5, 0.5, pw as f32 - 0.5, ph as f32 - 0.5);
@@ -324,26 +314,10 @@ unsafe fn draw_pill(st: &State, dc: HDC, r: RECT, rw: i32, rh: i32) {
         pb.close();
         let Some(path) = pb.finish() else { return };
 
-        let mut fill = Paint::default();
-        fill.anti_alias = true;
-        if st.style.theme == Resolved::Glass {
-            let (a, b) = (st.style.glass[0], st.style.glass[1]);
-            fill.shader = LinearGradient::new(
-                Point::from_xy(0.0, 0.0),
-                Point::from_xy(pw as f32, ph as f32),
-                vec![GradientStop::new(0.0, Color::from_rgba8(a[0], a[1], a[2], 235)), GradientStop::new(1.0, Color::from_rgba8(b[0], b[1], b[2], 235))],
-                SpreadMode::Pad,
-                Transform::identity(),
-            )
-            .unwrap_or(Shader::SolidColor(Color::BLACK));
-        } else {
-            fill.set_color_rgba8(bg[0], bg[1], bg[2], bg[3]);
-        }
-        pm.fill_path(&path, &fill, FillRule::Winding, Transform::identity(), None);
-        let mut rp = Paint::default();
-        rp.anti_alias = true;
-        rp.set_color_rgba8(rim[0], rim[1], rim[2], rim[3]);
-        pm.stroke_path(&path, &rp, &Stroke { width: 1.0, ..Default::default() }, Transform::identity(), None);
+        // smoky glass pill (no live backdrop here: the overlay itself is the frozen screen)
+        pm.fill_path(&path, &crate::gfx::paint([18, 19, 24, 215]), FillRule::Winding, Transform::identity(), None);
+        let bounds = Rect::from_xywh(0.0, 0.0, pw as f32, ph as f32).unwrap();
+        crate::gfx::glass_rim(&mut pm, &path, bounds, 1.0, 1.0);
         draw_text(&mut pm, &text, px, pw as f32 / 2.0, ph as f32 / 2.0, fg, 255);
 
         // position: above the selection's top-left; else below; else inside

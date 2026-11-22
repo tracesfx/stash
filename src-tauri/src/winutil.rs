@@ -24,6 +24,9 @@ pub struct SourceInfo {
     pub exe_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Foreground window at capture time (not saved): focus goes back to it when a Stash input closes.
+    #[serde(skip)]
+    pub hwnd: isize,
 }
 
 /// Foreground window at hotkey time: metadata plus what is needed for window capture / URL lookup.
@@ -68,7 +71,7 @@ pub fn foreground_info() -> Foreground {
             .and_then(|p| Path::new(p).file_name())
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        Foreground { source: SourceInfo { title, process, exe_path, url: None }, hwnd: hwnd.0 as isize, rect }
+        Foreground { source: SourceInfo { title, process, exe_path, url: None, hwnd: hwnd.0 as isize }, hwnd: hwnd.0 as isize, rect }
     }
 }
 
@@ -110,8 +113,17 @@ pub fn grab_virtual_screen() -> Result<Frame> {
         let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
         let w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
         let h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        grab_rect(RECT { left: x, top: y, right: x + w, bottom: y + h }, false)
+    }
+}
+
+/// Copies a virtual-desktop rect of the screen. CAPTUREBLT is off by default: with DWM composition layered
+/// windows are already in the screen image, and the flag made ~1 in 10 grabs take 1-4 s (measured, SPEC §8).
+pub fn grab_rect(r: RECT, captureblt: bool) -> Result<Frame> {
+    unsafe {
+        let (x, y, w, h) = (r.left, r.top, r.right - r.left, r.bottom - r.top);
         if w <= 0 || h <= 0 {
-            bail!("no virtual screen");
+            bail!("empty grab rect");
         }
         let screen = GetDC(None);
         let mem = CreateCompatibleDC(Some(screen));
@@ -126,9 +138,17 @@ pub fn grab_virtual_screen() -> Result<Frame> {
             ..Default::default()
         };
         let mut bits: *mut c_void = std::ptr::null_mut();
-        let bmp = CreateDIBSection(Some(screen), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
+        let bmp = match CreateDIBSection(Some(screen), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = DeleteDC(mem);
+                ReleaseDC(None, screen);
+                return Err(e.into());
+            }
+        };
         let old = SelectObject(mem, bmp.into());
-        let res = BitBlt(mem, 0, 0, w, h, Some(screen), x, y, SRCCOPY | CAPTUREBLT);
+        let rop = if captureblt { SRCCOPY | CAPTUREBLT } else { SRCCOPY };
+        let res = BitBlt(mem, 0, 0, w, h, Some(screen), x, y, rop);
         let mut bgra = Vec::new();
         if res.is_ok() && !bits.is_null() {
             bgra = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec();
@@ -168,5 +188,94 @@ pub fn monitor_rect_at(x: i32, y: i32) -> RECT {
         let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
         let _ = GetMonitorInfoW(mon, &mut info);
         info.rcMonitor
+    }
+}
+
+/// Work area (screen minus taskbar) of the primary monitor, in physical pixels, and its DPI scale.
+pub fn primary_work_area() -> (RECT, f32) {
+    unsafe {
+        let mon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(mon, &mut info);
+        let (mut dx, mut dy) = (96u32, 96u32);
+        let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
+        (info.rcWork, dx as f32 / 96.0)
+    }
+}
+
+/// Brings a window to the front and gives it focus, working around the foreground lock that makes a plain
+/// SetForegroundWindow from a background app only flash the taskbar button. Falls back to raising it visually.
+pub fn bring_to_front(hwnd: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let h = HWND(hwnd as *mut c_void);
+        if IsIconic(h).as_bool() {
+            let _ = ShowWindow(h, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(h, SW_SHOW);
+        }
+        let fg = GetForegroundWindow();
+        let fg_thread = if fg.0.is_null() { 0 } else { GetWindowThreadProcessId(fg, None) };
+        let me = GetCurrentThreadId();
+        let attached = fg_thread != 0 && fg_thread != me && AttachThreadInput(me, fg_thread, true).as_bool();
+        let _ = BringWindowToTop(h);
+        let ok = SetForegroundWindow(h).as_bool();
+        if attached {
+            let _ = AttachThreadInput(me, fg_thread, false);
+        }
+        if !ok {
+            // at least put it above other windows without making it permanently topmost
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW;
+            let _ = SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+            let _ = SetWindowPos(h, Some(HWND_NOTOPMOST), 0, 0, 0, 0, flags);
+        }
+    }
+}
+
+/// Gives focus back to the window the user was in (after a Stash input window closes).
+pub fn restore_focus(hwnd: isize) {
+    use windows::Win32::Foundation::HWND;
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let h = HWND(hwnd as *mut c_void);
+        if IsWindow(Some(h)).as_bool() {
+            let _ = SetForegroundWindow(h);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(mut v: Vec<u128>) -> String {
+        v.sort();
+        format!("median {} ms, p90 {} ms, max {} ms", v[v.len() / 2], v[v.len() * 9 / 10], v[v.len() - 1])
+    }
+
+    /// Full-desktop grab timing with and without CAPTUREBLT. Run: cargo test grab_bench -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn grab_bench() {
+        let r = unsafe {
+            let (x, y) = (GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN));
+            RECT { left: x, top: y, right: x + GetSystemMetrics(SM_CXVIRTUALSCREEN), bottom: y + GetSystemMetrics(SM_CYVIRTUALSCREEN) }
+        };
+        for flag in [true, false] {
+            let mut t = Vec::new();
+            for _ in 0..40 {
+                let t0 = std::time::Instant::now();
+                grab_rect(r, flag).unwrap();
+                t.push(t0.elapsed().as_millis());
+                std::thread::sleep(std::time::Duration::from_millis(60));
+            }
+            println!("CAPTUREBLT={flag}: {}", stats(t));
+        }
     }
 }

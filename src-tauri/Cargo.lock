@@ -3597,7 +3597,6 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "arboard",
- "base64 0.22.1",
  "chrono",
  "fontdue",
  "image",
@@ -3617,6 +3616,8 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "windows 0.62.2",
+ "windows-core 0.62.2",
+ "windows-numerics",
 ]
 
 [[package]]

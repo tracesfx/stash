@@ -1,7 +1,7 @@
 //! Radial capture wheel: native Win32 layered window (per-pixel alpha), topmost + no-activate (never steals
 //! focus, so the foreground app keeps its selection for "Stash selection"). Opens on hotkey hold, chooses on
-//! release. Rendered with tiny-skia (anti-aliased); themed (dark / light / liquid glass with a real blurred
-//! copy of the screen behind it).
+//! release. Rendered with tiny-skia (anti-aliased) in the shared Liquid Glass material (gfx::glass_fill) over a
+//! blurred copy of the frozen screen behind it.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,8 +14,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::gfx::draw_text;
-use crate::theme::{Resolved, Style};
+use crate::gfx::{self, draw_text};
+use crate::theme::Style;
 use crate::winutil::Frame;
 
 /// Everything the wheel can offer. Settings chooses which are shown; the wheel lays the enabled ones out
@@ -29,13 +29,12 @@ pub enum Action {
     Clipboard,
     Note,
     Record,
-    Board,
     Pause,
     Gallery,
     Settings,
 }
 
-pub const ALL_ACTIONS: [Action; 11] = [
+pub const ALL_ACTIONS: [Action; 10] = [
     Action::Snip,
     Action::Window,
     Action::Screen,
@@ -43,7 +42,6 @@ pub const ALL_ACTIONS: [Action; 11] = [
     Action::Clipboard,
     Action::Note,
     Action::Record,
-    Action::Board,
     Action::Pause,
     Action::Gallery,
     Action::Settings,
@@ -74,7 +72,6 @@ impl Action {
             Action::Clipboard => "clipboard",
             Action::Note => "note",
             Action::Record => "record",
-            Action::Board => "board",
             Action::Pause => "pause",
             Action::Gallery => "gallery",
             Action::Settings => "settings",
@@ -89,7 +86,6 @@ impl Action {
             Action::Clipboard => "Clipboard",
             Action::Note => "Note",
             Action::Record => "Record",
-            Action::Board => "Whiteboard",
             Action::Pause => "Pause",
             Action::Gallery => "Gallery",
             Action::Settings => "Settings",
@@ -104,44 +100,23 @@ const GROW: f32 = 9.0;
 const OPEN_MS: f32 = 130.0;
 const HOVER_MS: f32 = 90.0;
 
-// ---------- palette ----------
-struct Pal {
-    base: [u8; 4],  // wedge body
-    wedge: [u8; 4], // extra per-wedge tint
-    rim: [u8; 4],
-    text: [u8; 3],
-    shadow: f32,
-    glass: bool,
-}
-
-fn palette(t: Resolved) -> Pal {
-    match t {
-        Resolved::Dark => Pal { base: [26, 26, 33, 226], wedge: [255, 255, 255, 10], rim: [255, 255, 255, 30], text: [240, 240, 246], shadow: 0.07, glass: false },
-        Resolved::Light => Pal { base: [250, 250, 253, 232], wedge: [0, 0, 0, 8], rim: [0, 0, 0, 34], text: [28, 28, 34], shadow: 0.05, glass: false },
-        Resolved::Glass => Pal { base: [20, 24, 40, 70], wedge: [255, 255, 255, 30], rim: [255, 255, 255, 120], text: [255, 255, 255], shadow: 0.08, glass: true },
-    }
-}
-
 struct State {
     center: POINT, // screen coords
     size: i32,
     scale: f32,
-    pal: Pal,
-    accent: [u8; 3],
+    style: Style,
     hover: Option<usize>,
     hprog: Vec<f32>,
     acts: Vec<Action>,
-    glass: [[u8; 3]; 3],
     gap: f32,
     dead: f32,
     opacity: f32,
-    tint: f32,
     t0: Instant,
     last: Instant,
     release: Arc<AtomicBool>,
     result: Option<Action>,
     done: bool,
-    bg: Option<Pixmap>, // blurred screen behind the wheel (glass only)
+    bg: Option<Pixmap>, // blurred screen behind the wheel
     dib_dc: HDC,
     dib_bits: *mut u8,
     origin: POINT, // window top-left
@@ -179,13 +154,7 @@ pub fn run(cursor: POINT, scale: f32, release: Arc<AtomicBool>, style: Style, fr
         let cy = cursor.y.clamp(m.top + half, (m.bottom - half).max(m.top + half));
         let origin = POINT { x: cx - half, y: cy - half };
 
-        let mut pal = palette(style.theme);
-        if pal.glass {
-            // translucency: 0 -> frosted (strong body), 1 -> clear
-            pal.base[3] = (190.0 - style.translucency * 240.0).clamp(10.0, 255.0) as u8;
-        }
-        let accent = style.hover;
-        let bg = if pal.glass { frame.as_deref().map(|f| blurred_backdrop(f, origin, size, style.blur, style.saturation)) } else { None };
+        let bg = frame.as_deref().and_then(|f| gfx::blur_backdrop(f, origin, size, size, style.blur, style.saturation));
 
         // 32-bit DIB the layered window reads from
         let screen = GetDC(None);
@@ -209,16 +178,13 @@ pub fn run(cursor: POINT, scale: f32, release: Arc<AtomicBool>, style: Style, fr
             center: POINT { x: cx, y: cy },
             size,
             scale,
-            pal,
-            accent,
+            style,
             hover: None,
             hprog: vec![0.0; acts.len()],
             acts,
-            glass: style.glass,
             gap: style.wheel_gap,
             dead: style.wheel_hole,
             opacity: style.wheel_opacity,
-            tint: style.tint,
             t0: Instant::now(),
             last: Instant::now(),
             release,
@@ -418,7 +384,7 @@ fn render(st: &State) -> Pixmap {
     let sc = st.scale;
     let c = s as f32 / 2.0;
     let (r_in, r_out) = (st.dead * sc, OUTER_R * sc);
-    let pal = &st.pal;
+    let white = [255u8, 255, 255];
     let mut pm = Pixmap::new(s, s).unwrap();
 
     let radii: Vec<f32> = (0..st.acts.len()).map(|i| r_out + GROW * sc * ease(st.hprog[i])).collect();
@@ -428,84 +394,52 @@ fn render(st: &State) -> Pixmap {
     for k in (1..=7).rev() {
         let r = r_out + k as f32 * 2.6 * sc;
         if let Some(p) = PathBuilder::from_circle(c, c + 4.0 * sc, r) {
-            let a = (pal.shadow * 255.0 * 1.4 / k as f32).min(255.0) as u8;
-            pm.fill_path(&p, &paint_rgba(0, 0, 0, a), FillRule::Winding, Transform::identity(), None);
+            pm.fill_path(&p, &paint_rgba(0, 0, 0, (16.0 / k as f32) as u8), FillRule::Winding, Transform::identity(), None);
         }
     }
 
-    // union of all wedges = clip for the body
-    let mut mask = Mask::new(s, s).unwrap();
+    // one glass body: all wedges + the centre disc
+    let disc = PathBuilder::from_circle(c, c, r_in - st.gap * sc);
+    let mut pb = PathBuilder::new();
     for p in &paths {
-        mask.fill_path(p, FillRule::Winding, true, Transform::identity());
+        pb.push_path(p);
     }
-    if let Some(d) = PathBuilder::from_circle(c, c, r_in - st.gap * sc) {
-        mask.fill_path(&d, FillRule::Winding, true, Transform::identity()); // centre disc shares the body material
+    if let Some(d) = &disc {
+        pb.push_path(d);
     }
-    if pal.glass {
-        if let Some(bg) = &st.bg {
-            pm.draw_pixmap(0, 0, bg.as_ref(), &PixmapPaint::default(), Transform::identity(), Some(&mask));
-        }
-    }
-    let full = PathBuilder::from_rect(Rect::from_xywh(0.0, 0.0, s as f32, s as f32).unwrap());
-    pm.fill_path(&full, &paint_rgba(pal.base[0], pal.base[1], pal.base[2], pal.base[3]), FillRule::Winding, Transform::identity(), Some(&mask));
-    if pal.glass {
-        // diagonal sheen across the glass
-        let mut sheen = Paint::default();
-        sheen.shader = LinearGradient::new(
-            Point::from_xy(c - r_out, c - r_out),
-            Point::from_xy(c + r_out, c + r_out),
-            vec![
-                GradientStop::new(0.0, Color::from_rgba8(st.glass[0][0], st.glass[0][1], st.glass[0][2], (120 as f32 * st.tint).min(255.0) as u8)),
-                GradientStop::new(0.5, Color::from_rgba8(st.glass[1][0], st.glass[1][1], st.glass[1][2], (78 as f32 * st.tint).min(255.0) as u8)),
-                GradientStop::new(1.0, Color::from_rgba8(st.glass[2][0], st.glass[2][1], st.glass[2][2], (112 as f32 * st.tint).min(255.0) as u8)),
-            ],
-            SpreadMode::Pad,
-            Transform::identity(),
-        )
-        .unwrap_or(Shader::SolidColor(Color::TRANSPARENT));
-        pm.fill_path(&full, &sheen, FillRule::Winding, Transform::identity(), Some(&mask));
+    let bounds = Rect::from_xywh(0.0, 0.0, s as f32, s as f32).unwrap();
+    if let Some(body) = pb.finish() {
+        pm.fill_path(&body, &Paint { blend_mode: BlendMode::Clear, ..Default::default() }, FillRule::Winding, Transform::identity(), None);
+        gfx::glass_fill(&mut pm, &body, bounds, st.bg.as_ref(), &st.style, 1.0);
     }
 
-    let acc = st.accent;
+    let acc = st.style.hover;
     for (i, p) in paths.iter().enumerate() {
         let h = st.hprog[i];
-        pm.fill_path(p, &paint_rgba(pal.wedge[0], pal.wedge[1], pal.wedge[2], pal.wedge[3]), FillRule::Winding, Transform::identity(), None);
+        pm.fill_path(p, &paint_rgba(255, 255, 255, 8), FillRule::Winding, Transform::identity(), None);
         if h > 0.0 {
-            let a = if pal.glass { 150.0 } else { 235.0 } * h;
-            pm.fill_path(p, &paint_rgba(acc[0], acc[1], acc[2], a as u8), FillRule::Winding, Transform::identity(), None);
+            pm.fill_path(p, &paint_rgba(acc[0], acc[1], acc[2], (135.0 * h) as u8), FillRule::Winding, Transform::identity(), None);
         }
-        let mut rim = paint_rgba(pal.rim[0], pal.rim[1], pal.rim[2], pal.rim[3]);
-        if pal.glass {
-            rim.shader = LinearGradient::new(
-                Point::from_xy(c - r_out, c - r_out),
-                Point::from_xy(c + r_out, c + r_out),
-                vec![GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 190)), GradientStop::new(1.0, Color::from_rgba8(255, 255, 255, 30))],
-                SpreadMode::Pad,
-                Transform::identity(),
-            )
-            .unwrap_or(Shader::SolidColor(Color::WHITE));
-        }
-        pm.stroke_path(p, &rim, &Stroke { width: 1.0 * sc, ..Default::default() }, Transform::identity(), None);
+        gfx::glass_rim(&mut pm, p, Rect::from_xywh(c - radii[i], c - radii[i], radii[i] * 2.0, radii[i] * 2.0).unwrap(), 1.0 * sc, 0.9);
     }
 
     // icons
     for i in 0..st.acts.len() {
         let h = ease(st.hprog[i]);
         let (x, y) = pt(c, (r_in + radii[i]) / 2.0 + 1.0 * sc, i as f32 * (360.0 / st.acts.len() as f32));
-        let col = if st.hprog[i] > 0.5 { [255, 255, 255] } else { pal.text };
-        draw_icon(&mut pm, st.acts[i], x, y, (13.0 + 2.5 * h) * sc, col, 235, 1.7 * sc);
+        draw_icon(&mut pm, st.acts[i], x, y, (13.0 + 2.5 * h) * sc, white, 235, 1.7 * sc);
     }
 
     // centre disc with the hovered action's name
-    if let Some(d) = PathBuilder::from_circle(c, c, r_in - st.gap * sc) {
-        let (fa, ra) = if pal.glass { (22, 110) } else { (14, 40) };
-        pm.fill_path(&d, &paint_rgba(pal.rim[0], pal.rim[1], pal.rim[2], fa), FillRule::Winding, Transform::identity(), None);
-        pm.stroke_path(&d, &paint_rgba(pal.rim[0], pal.rim[1], pal.rim[2], ra), &Stroke { width: 1.0 * sc, ..Default::default() }, Transform::identity(), None);
+    if let Some(d) = &disc {
+        let r = r_in - st.gap * sc;
+        pm.fill_path(d, &paint_rgba(255, 255, 255, 14), FillRule::Winding, Transform::identity(), None);
+        gfx::glass_rim(&mut pm, d, Rect::from_xywh(c - r, c - r, r * 2.0, r * 2.0).unwrap(), 1.0 * sc, 1.0);
     }
     if let Some(i) = st.hover {
-        draw_text(&mut pm, st.acts[i].label(), 11.5 * sc, c, c, pal.text, 255);
+        draw_text(&mut pm, st.acts[i].label(), 11.5 * sc, c, c, white, 255);
     } else if let Some(d) = PathBuilder::from_circle(c, c, 2.6 * sc) {
-        pm.fill_path(&d, &paint_rgba(pal.text[0], pal.text[1], pal.text[2], 120), FillRule::Winding, Transform::identity(), None);
+        pm.fill_path(&d, &paint_rgba(255, 255, 255, 120), FillRule::Winding, Transform::identity(), None);
     }
     pm
 }
@@ -547,12 +481,6 @@ fn draw_icon(pm: &mut Pixmap, a: Action, x: f32, y: f32, size: f32, col: [u8; 3]
             seg(&[(-0.7, -0.6), (0.7, -0.6), (0.7, 0.9), (-0.7, 0.9)], true);
             seg(&[(-0.3, -0.9), (0.3, -0.9), (0.3, -0.45), (-0.3, -0.45)], true);
         }
-        Action::Board => {
-            seg(&[(-0.9, -0.7), (0.9, -0.7), (0.9, 0.5), (-0.9, 0.5)], true);
-            seg(&[(-0.5, 0.2), (-0.15, -0.25), (0.15, 0.1), (0.5, -0.3)], false);
-            seg(&[(-0.4, 0.5), (-0.6, 0.9)], false);
-            seg(&[(0.4, 0.5), (0.6, 0.9)], false);
-        }
         Action::Pause => {
             seg(&[(-0.45, -0.7), (-0.45, 0.7)], false);
             seg(&[(0.45, -0.7), (0.45, 0.7)], false);
@@ -593,72 +521,5 @@ fn draw_icon(pm: &mut Pixmap, a: Action, x: f32, y: f32, size: f32, col: [u8; 3]
     if let Some(path) = pb.finish() {
         let stroke = Stroke { width, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Default::default() };
         pm.stroke_path(&path, &paint_rgba(col[0], col[1], col[2], alpha), &stroke, Transform::identity(), None);
-    }
-}
-
-// ---------- glass backdrop ----------
-/// Blurred, slightly saturated copy of the frozen screen region behind the wheel.
-fn blurred_backdrop(frame: &Frame, origin: POINT, size: i32, blur: u8, sat: f32) -> Pixmap {
-    let q = 4i32; // work at 1/4 resolution
-    let sw = ((size + q - 1) / q) as usize;
-    let mut small = vec![[0f32; 3]; sw * sw];
-    for sy in 0..sw {
-        for sx in 0..sw {
-            let (mut r, mut g, mut b, mut n) = (0f32, 0f32, 0f32, 0f32);
-            for dy in 0..q {
-                for dx in 0..q {
-                    let fx = origin.x + sx as i32 * q + dx - frame.x;
-                    let fy = origin.y + sy as i32 * q + dy - frame.y;
-                    if fx >= 0 && fy >= 0 && fx < frame.w && fy < frame.h {
-                        let i = ((fy * frame.w + fx) * 4) as usize;
-                        b += frame.bgra[i] as f32;
-                        g += frame.bgra[i + 1] as f32;
-                        r += frame.bgra[i + 2] as f32;
-                        n += 1.0;
-                    }
-                }
-            }
-            small[sy * sw + sx] = if n > 0.0 { [r / n, g / n, b / n] } else { [20.0, 22.0, 34.0] };
-        }
-    }
-    // 3 separable box-blur passes (radius 3 at 1/4 res ~ 12 px, gaussian-like)
-    let rad = (blur as usize * 3 / 26).max(1) * usize::from(blur > 0);
-    let mut tmp = small.clone();
-    for _ in 0..3 {
-        box_blur(&small, &mut tmp, sw, rad, true);
-        box_blur(&tmp, &mut small, sw, rad, false);
-    }
-    let mut pm_small = Pixmap::new(sw as u32, sw as u32).unwrap();
-    for (p, px) in small.iter().zip(pm_small.pixels_mut().iter_mut()) {
-        let l = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
-        let f = |v: f32| (l + (v - l) * sat).clamp(0.0, 255.0) as u8; // a little extra saturation
-        *px = ColorU8::from_rgba(f(p[0]), f(p[1]), f(p[2]), 255).premultiply();
-    }
-    let mut out = Pixmap::new(size as u32, size as u32).unwrap();
-    out.draw_pixmap(
-        0,
-        0,
-        pm_small.as_ref(),
-        &PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() },
-        Transform::from_scale(q as f32, q as f32),
-        None,
-    );
-    out
-}
-
-fn box_blur(src: &[[f32; 3]], dst: &mut [[f32; 3]], n: usize, r: usize, horizontal: bool) {
-    for a in 0..n {
-        for b in 0..n {
-            let (mut acc, mut cnt) = ([0f32; 3], 0f32);
-            for k in b.saturating_sub(r)..=(b + r).min(n - 1) {
-                let i = if horizontal { a * n + k } else { k * n + a };
-                for ch in 0..3 {
-                    acc[ch] += src[i][ch];
-                }
-                cnt += 1.0;
-            }
-            let o = if horizontal { a * n + b } else { b * n + a };
-            dst[o] = [acc[0] / cnt, acc[1] / cnt, acc[2] / cnt];
-        }
     }
 }

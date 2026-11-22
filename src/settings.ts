@@ -1,257 +1,498 @@
+// Settings (SPEC §7): tabs in a glass segmented control and custom sliders. There is no Save button: every
+// change is saved and applied as it is made (debounced), with a quiet "Saved" tick. Esc closes the window.
+// Appearance is a hidden tab, revealed from the footer.
 import "./theme";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 
-interface Config { library_path: string; hotkey: string; hold_ms: number; capture_url: boolean; show_popup: boolean; autostart: boolean; theme: string; glass: string[]; ocr: boolean; appearance: Appearance; rec_system_audio: boolean; rec_mic: boolean; rec_fps: number; rec_max_secs: number; wheel_actions: string[]; }
-interface Appearance { [k: string]: number | string | boolean; glass_translucency: number; glass_blur: number; glass_saturation: number; glass_tint: number; hover_color: string; wheel_size: number; wheel_hole: number; wheel_gap: number; wheel_opacity: number; ui_font: number; ui_radius: number; popup_corner: string; popup_ms: number; animations: boolean; }
-interface Dto { config: Config; autostart_supported: boolean; version: string; }
+interface Appearance {
+  [k: string]: number | string | boolean;
+  glass_translucency: number; glass_blur: number; glass_saturation: number; glass_tint: number; hover_color: string;
+  win_translucency: number; win_blur: number; win_saturation: number;
+  wheel_size: number; wheel_hole: number; wheel_gap: number; wheel_opacity: number; ui_font: number; ui_radius: number;
+  popup_corner: string; animations: boolean;
+}
+interface Config {
+  library_path: string; hotkey: string; hold_ms: number; capture_url: boolean; tag_menu: boolean;
+  autostart: boolean; glass: string[]; ocr: boolean; appearance: Appearance; rec_system_audio: boolean; rec_mic: boolean;
+  rec_fps: number; rec_max_secs: number; wheel_actions: string[]; style_rev: number;
+}
+interface Dto { config: Config; autostart_supported: boolean; }
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-const keys = $("keys"), holdr = $<HTMLInputElement>("holdr"), holdv = $("holdv"), lib = $<HTMLInputElement>("lib");
-const ocr = $<HTMLInputElement>("ocr"), autostart = $<HTMLInputElement>("autostart"), popup = $<HTMLInputElement>("popup"), url = $<HTMLInputElement>("url");
-const status = $("status"), recBtn = $("rec");
-
-const recsys = $<HTMLInputElement>("recsys"), recmic = $<HTMLInputElement>("recmic"), recfps = $<HTMLInputElement>("recfps"), recfpsv = $("recfpsv"), recmax = $<HTMLInputElement>("recmax");
-recfps.addEventListener("input", () => (recfpsv.textContent = recfps.value));
-
-// ---- appearance (applies live) ----
-type Def = { k: string; label: string; hint?: string; min: number; max: number; step?: number; unit?: string; glass?: boolean };
-const SLIDERS: Def[] = [
-  { k: "glass_translucency", label: "Glass translucency", hint: "Frosted (left) to clear (right).", min: 0, max: 100, unit: "%", glass: true },
-  { k: "glass_blur", label: "Glass blur", min: 0, max: 60, unit: "px", glass: true },
-  { k: "glass_saturation", label: "Glass saturation", min: 100, max: 250, step: 5, unit: "%", glass: true },
-  { k: "glass_tint", label: "Colour wash strength", min: 0, max: 100, unit: "%", glass: true },
-  { k: "wheel_size", label: "Wheel size", min: 60, max: 160, step: 5, unit: "%" },
-  { k: "wheel_hole", label: "Wheel centre size", hint: "Radius of the dead zone in the middle.", min: 20, max: 80, unit: "px" },
-  { k: "wheel_gap", label: "Wheel slice gap", min: 0, max: 14, unit: "px" },
-  { k: "wheel_opacity", label: "Wheel opacity", min: 30, max: 100, unit: "%" },
-  { k: "ui_font", label: "Text size", min: 11, max: 18, unit: "px" },
-  { k: "ui_radius", label: "Corner roundness", min: 0, max: 20, unit: "px" },
-  { k: "popup_ms", label: "Popup duration", min: 600, max: 8000, step: 100, unit: "ms" },
-];
-const APP_PRESETS: [string, Partial<Appearance>][] = [
-  ["Default", { glass_translucency: 75, glass_blur: 26, glass_saturation: 170, glass_tint: 50, wheel_size: 100, wheel_hole: 40, wheel_gap: 5, wheel_opacity: 100, ui_font: 13, ui_radius: 10 }],
-  ["Crystal", { glass_translucency: 85, glass_blur: 40, glass_saturation: 200, glass_tint: 30 }],
-  ["Frosted", { glass_translucency: 15, glass_blur: 50, glass_saturation: 130, glass_tint: 60 }],
-  ["Compact", { wheel_size: 80, wheel_hole: 30, ui_font: 12, ui_radius: 6 }],
-  ["Big & soft", { wheel_size: 130, wheel_gap: 8, ui_font: 15, ui_radius: 16 }],
-];
-let aTimer: number | undefined;
-function pushAppearance() {
-  clearTimeout(aTimer);
-  aTimer = window.setTimeout(() => invoke("settings_set_appearance", { appearance: cfg.appearance }).catch((e) => say(String(e), true)), 80);
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text) e.textContent = text; // textContent only (paths and names are untrusted)
+  return e;
 }
-function row(label: string, hint: string | undefined, control: HTMLElement, cls = ""): HTMLElement {
-  const r = document.createElement("div");
-  r.className = "set " + cls;
-  const g = document.createElement("div");
-  g.className = "grow";
-  const l = document.createElement("div");
-  l.className = "lab";
-  l.textContent = label;
-  g.append(l);
-  if (hint) { const h = document.createElement("div"); h.className = "hint"; h.textContent = hint; g.append(h); }
-  r.append(g, control);
+
+let draft: Config;
+let opened = false; // entrance finished (click-outside-to-close is armed after it)
+let saved: Config; // last config the app accepted
+let autostartSupported = true;
+
+// ---------- autosave ----------
+let cTimer: number | undefined;
+let pending = false;
+/** Saves the whole draft (debounced while dragging sliders); now = flush immediately. */
+function commit(now = false) {
+  pending = true;
+  refreshPreview();
+  clearTimeout(cTimer);
+  cTimer = window.setTimeout(flush, now ? 0 : 220);
+}
+async function flush() {
+  clearTimeout(cTimer);
+  if (!pending) return;
+  pending = false;
+  try {
+    saved = await invoke<Config>("settings_save", { new: draft });
+    say("Saved", false, true);
+  } catch (e) {
+    say(String(e), true);
+    // a rejected shortcut goes back to the one that still works
+    if (draft.hotkey !== saved.hotkey) { draft.hotkey = saved.hotkey; showKeys(draft.hotkey); }
+  }
+}
+
+// ---------- status ----------
+let sTimer: number | undefined;
+function say(msg: string, err = false, ok = false) {
+  const s = $("status");
+  s.textContent = msg;
+  s.className = msg ? "on" + (err ? " err" : "") + (ok ? " ok" : "") : "";
+  clearTimeout(sTimer);
+  if (msg) sTimer = window.setTimeout(() => s.classList.remove("on"), err ? 6000 : 1400);
+}
+
+// ---------- building blocks ----------
+interface RowOpts { stack?: boolean; value?: HTMLElement }
+/** Label + hint on the left, control on the right (or below, for sliders) so text never gets squished. */
+function row(label: string, hint: string, control: HTMLElement, o: RowOpts = {}): HTMLElement {
+  const r = el("div", "row" + (o.stack ? " stack" : ""));
+  const t = el("div");
+  t.append(el("div", "lab", label));
+  if (hint) t.append(el("div", "hint", hint));
+  r.append(t);
+  if (o.stack) {
+    if (o.value) r.append(o.value);
+    else r.append(el("span"));
+    control.classList.add("ctl");
+    r.append(control);
+  } else {
+    r.append(control);
+  }
   return r;
 }
-function buildAppearance() {
-  const host = $("appearance");
-  host.replaceChildren();
-  const title = document.createElement("div");
-  title.className = "set col";
-  title.style.border = "0";
-  title.innerHTML = '<div><div class="lab">Appearance</div><div class="hint">Everything here applies instantly to every Stash window and the radial wheel.</div></div><div class="presets" id="apresets"></div>';
-  host.append(title);
-  const inputs: Record<string, HTMLInputElement> = {};
-  const vals: Record<string, HTMLElement> = {};
-  const refresh = () => {
-    for (const d of SLIDERS) { inputs[d.k].value = String(cfg.appearance[d.k]); vals[d.k].textContent = `${cfg.appearance[d.k]} ${d.unit ?? ""}`; }
-  };
-  for (const d of SLIDERS) {
-    const wrap = document.createElement("div");
-    wrap.style.cssText = "display:flex;align-items:center;gap:10px";
-    const inp = document.createElement("input");
-    inp.type = "range"; inp.min = String(d.min); inp.max = String(d.max); inp.step = String(d.step ?? 1);
-    const v = document.createElement("span");
-    v.className = "val";
-    inp.addEventListener("input", () => { cfg.appearance[d.k] = Number(inp.value); v.textContent = `${inp.value} ${d.unit ?? ""}`; pushAppearance(); });
-    inputs[d.k] = inp; vals[d.k] = v;
-    wrap.append(inp, v);
-    const r = row(d.label, d.hint, wrap, d.glass ? "glassonly" : "");
-    host.append(r);
-  }
-  // hover colour
-  const hw = document.createElement("div");
-  hw.style.cssText = "display:flex;align-items:center;gap:8px";
-  const hc = document.createElement("input");
-  hc.type = "color"; hc.style.cssText = "width:40px;height:30px;padding:0;border:1px solid var(--line);border-radius:8px;background:none;cursor:pointer";
-  hc.value = cfg.appearance.hover_color || "#4a7dff";
-  hc.addEventListener("input", () => { cfg.appearance.hover_color = hc.value; pushAppearance(); });
-  const hr = document.createElement("button");
-  hr.className = "btn"; hr.textContent = "Use Windows accent";
-  hr.addEventListener("click", () => { cfg.appearance.hover_color = ""; pushAppearance(); });
-  hw.append(hc, hr);
-  host.append(row("Hover / selection colour", "Used for wheel highlight, hovered buttons and selection.", hw));
-  // popup corner
-  const sel = document.createElement("select");
-  sel.className = "field"; sel.style.width = "150px";
-  for (const [v, t] of [["br", "Bottom right"], ["bl", "Bottom left"], ["tr", "Top right"], ["tl", "Top left"]]) { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.append(o); }
-  sel.value = cfg.appearance.popup_corner;
-  sel.addEventListener("change", () => { cfg.appearance.popup_corner = sel.value; pushAppearance(); });
-  host.append(row("Popup and note position", "Screen corner for the confirmation popup and quick note.", sel));
-  // animations
-  const lab = document.createElement("label");
-  lab.className = "switch";
-  const an = document.createElement("input");
-  an.type = "checkbox"; an.checked = cfg.appearance.animations;
-  an.addEventListener("change", () => { cfg.appearance.animations = an.checked; pushAppearance(); });
-  lab.append(an, document.createElement("i"));
-  host.append(row("Animations", "Turn off for instant, motion-free UI.", lab));
-  // presets
-  for (const [name, p] of APP_PRESETS) {
-    const b = document.createElement("button");
-    b.className = "btn"; b.textContent = name;
-    b.addEventListener("click", () => { Object.assign(cfg.appearance, p); refresh(); pushAppearance(); });
-    $("apresets").append(b);
-  }
-  $("apresets").style.cssText = "display:flex;gap:8px;flex-wrap:wrap";
-  refresh();
+
+function group(title: string, ...rows: HTMLElement[]): HTMLElement[] {
+  const g = el("div", "group");
+  g.append(...rows);
+  return title ? [el("div", "gt", title), g] : [g];
 }
 
-// ---- radial wheel: which actions are shown (applies live; shown in this fixed order) ----
+function toggle(checked: boolean, onChange: (v: boolean) => void, disabled = false): HTMLLabelElement {
+  const l = el("label", "switch");
+  const i = el("input");
+  i.type = "checkbox";
+  i.checked = checked;
+  i.disabled = disabled;
+  i.addEventListener("change", () => { onChange(i.checked); commit(true); });
+  l.append(i, el("i"));
+  return l;
+}
+
+interface SliderOpts { min: number; max: number; step?: number; stops?: number[]; value: number; fmt: (v: number) => string; onInput: (v: number) => void }
+interface Slider { el: HTMLElement; val: HTMLElement; set: (v: number) => void; disable: (off: boolean) => void }
+
+/** Custom slider: thick glass track, bright fill, lens knob; pointer drag + full keyboard support. */
+function slider(o: SliderOpts): Slider {
+  const s = el("div", "slider");
+  s.tabIndex = 0;
+  s.setAttribute("role", "slider");
+  const track = el("div", "track"), fill = el("div", "fill"), knob = el("div", "knob");
+  track.append(fill);
+  s.append(track);
+  const val = el("span", "val");
+  const n = o.stops ? o.stops.length : 0;
+  if (o.stops) {
+    const ticks = el("div", "ticks");
+    o.stops.forEach((_, i) => { const t = el("i"); t.style.left = `${(i / (n - 1)) * 100}%`; ticks.append(t); });
+    s.append(ticks);
+  }
+  s.append(knob);
+  let v = o.value;
+  const frac = (x: number) => {
+    if (o.stops) {
+      let best = 0;
+      o.stops.forEach((st, i) => { if (Math.abs(st - x) < Math.abs(o.stops![best] - x)) best = i; });
+      return best / (n - 1);
+    }
+    return (x - o.min) / (o.max - o.min);
+  };
+  const fromFrac = (f: number) => {
+    f = Math.min(1, Math.max(0, f));
+    if (o.stops) return o.stops[Math.round(f * (n - 1))];
+    const step = o.step ?? 1;
+    return Math.min(o.max, Math.max(o.min, Math.round((o.min + f * (o.max - o.min)) / step) * step));
+  };
+  const paint = () => {
+    const f = frac(v);
+    // the knob travels inside the track (13px = knob radius), the fill reaches its centre
+    knob.style.left = `calc(13px + (100% - 26px) * ${f})`;
+    fill.style.width = `calc(13px + (100% - 26px) * ${f})`;
+    val.textContent = o.fmt(v);
+    s.setAttribute("aria-valuenow", String(v));
+    s.setAttribute("aria-valuetext", o.fmt(v));
+  };
+  const set = (nv: number) => { if (nv !== v) { v = nv; paint(); o.onInput(v); commit(); } };
+  const at = (clientX: number) => {
+    const r = s.getBoundingClientRect();
+    return fromFrac((clientX - r.left - 13) / (r.width - 26));
+  };
+  s.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    s.setPointerCapture(e.pointerId);
+    s.classList.add("drag");
+    s.focus();
+    set(at(e.clientX));
+    const move = (m: PointerEvent) => set(at(m.clientX));
+    const up = () => { s.classList.remove("drag"); s.removeEventListener("pointermove", move); };
+    s.addEventListener("pointermove", move);
+    s.addEventListener("pointerup", up, { once: true });
+    s.addEventListener("pointercancel", up, { once: true });
+  });
+  s.addEventListener("keydown", (e) => {
+    const idx = o.stops ? Math.round(frac(v) * (n - 1)) : 0;
+    const step = o.step ?? 1;
+    const big = o.stops ? 1 : Math.max(step, Math.round((o.max - o.min) / 10 / step) * step);
+    let nv: number | null = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowUp") nv = o.stops ? o.stops[Math.min(n - 1, idx + 1)] : Math.min(o.max, v + step);
+    else if (e.key === "ArrowLeft" || e.key === "ArrowDown") nv = o.stops ? o.stops[Math.max(0, idx - 1)] : Math.max(o.min, v - step);
+    else if (e.key === "PageUp") nv = o.stops ? o.stops[Math.min(n - 1, idx + 2)] : Math.min(o.max, v + big);
+    else if (e.key === "PageDown") nv = o.stops ? o.stops[Math.max(0, idx - 2)] : Math.max(o.min, v - big);
+    else if (e.key === "Home") nv = o.stops ? o.stops[0] : o.min;
+    else if (e.key === "End") nv = o.stops ? o.stops[n - 1] : o.max;
+    if (nv !== null) { e.preventDefault(); set(nv); }
+  });
+  paint();
+  return { el: s, val, set: (x: number) => { v = x; paint(); }, disable: (off: boolean) => { s.classList.toggle("off", off); s.tabIndex = off ? -1 : 0; } };
+}
+
+/** A row with a full-width slider under its label and the value as a pill on the right. */
+function sliderRow(label: string, hint: string, o: SliderOpts): { row: HTMLElement; s: Slider } {
+  const s = slider(o);
+  return { row: row(label, hint, s.el, { stack: true, value: s.val }), s };
+}
+
+const ms = (v: number) => `${v} ms`;
+const clipLen = (v: number) => (v === 0 ? "No limit" : v < 60 ? `${v} s` : `${Math.round(v / 60)} min`);
+
+// ---------- tabs ----------
+const TABS: [string, string][] = [["capture", "Capture"], ["wheel", "Wheel"], ["recording", "Recording"], ["general", "General"], ["appearance", "Appearance"]];
+const panes: Record<string, HTMLElement> = {};
+const tabBtns: Record<string, HTMLButtonElement> = {};
+const ind = el("span", "ind");
+let current = "capture";
+
+function showAppearanceTab(on: boolean) {
+  tabBtns.appearance.style.display = on ? "" : "none";
+  $("appBtn").classList.toggle("on", on);
+  try { localStorage.setItem("stash.settings.appearance", on ? "1" : "0"); } catch { /* storage unavailable */ }
+  if (!on && current === "appearance") select("capture");
+  else moveIndicator();
+}
+
+function moveIndicator() {
+  const b = tabBtns[current];
+  if (!b || b.style.display === "none") return;
+  ind.style.width = `${b.offsetWidth}px`;
+  ind.style.transform = `translateX(${b.offsetLeft}px)`;
+}
+
+function select(id: string) {
+  current = id;
+  for (const [k] of TABS) {
+    tabBtns[k].classList.toggle("on", k === id);
+    tabBtns[k].setAttribute("aria-selected", String(k === id));
+    panes[k].classList.toggle("on", k === id);
+  }
+  moveIndicator();
+  $("panes").scrollTop = 0;
+  if (id === "appearance") refreshPreview();
+}
+
+function buildTabs() {
+  const nav = $("tabs");
+  nav.append(ind);
+  for (const [id, label] of TABS) {
+    const b = el("button", "", label);
+    b.setAttribute("role", "tab");
+    b.onclick = () => select(id);
+    tabBtns[id] = b;
+    nav.append(b);
+    const p = el("section", "pane");
+    panes[id] = p;
+    $("panes").append(p);
+  }
+}
+
+// ---------- capture ----------
+let recording = false;
+const keys = el("div", "keys");
+const recBtn = el("button", "btn", "Change");
+
+function showKeys(combo: string, rec = false) {
+  keys.replaceChildren();
+  if (rec) { keys.append(el("span", "rect", "Press the new shortcut…")); return; }
+  for (const k of combo.split("+")) keys.append(el("kbd", "", k === "Super" ? "Win" : k));
+}
+
+function buildCapture() {
+  const resetNote = el("button", "btn", "Reset to corner");
+  resetNote.onclick = async () => { await invoke("note_reset_position"); say("The note will open in the corner again", false, true); };
+  const ctl = el("div", "ctl inline");
+  ctl.append(keys, recBtn);
+  showKeys(draft.hotkey);
+  const hold = sliderRow("Wheel hold delay", "How long to hold the shortcut before the radial wheel opens. A shorter press is a snip.", { min: 80, max: 1000, step: 10, value: draft.hold_ms, fmt: ms, onInput: (v) => (draft.hold_ms = v) });
+
+  const tagRow = row("Tag menu after capture", "A ring of your recent tags around the capture. Click one, or type a new tag; Tab switches to a caption. It disappears when you move the pointer off it. When off, a small toast confirms the save.", toggle(draft.tag_menu, (v) => (draft.tag_menu = v)));
+
+  const corners = el("div", "corners");
+  for (const c of ["tl", "tr", "bl", "br"]) {
+    const b = el("button");
+    b.title = { tl: "Top left", tr: "Top right", bl: "Bottom left", br: "Bottom right" }[c]!;
+    b.classList.toggle("on", draft.appearance.popup_corner === c);
+    b.onclick = () => { draft.appearance.popup_corner = c; corners.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); commit(true); };
+    corners.append(b);
+  }
+
+  panes.capture.append(
+    ...group("Shortcut",
+      row("Capture shortcut", "Tap to snip a region. Hold for the radial wheel. Needs a modifier (Ctrl, Alt, Shift or Win).", ctl),
+      hold.row),
+    ...group("After a capture", tagRow,
+      row("Toast position", "Screen corner for confirmation toasts. The quick note starts here too until you move it.", corners),
+      row("Quick note position", "Drag the note bar anywhere; it reopens where you left it.", resetNote)),
+  );
+}
+
+// ---------- wheel ----------
+const ICONS: Record<string, string> = {
+  snip: '<path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"/>',
+  window: '<rect x="2.5" y="4" width="15" height="12" rx="2"/><path d="M2.5 7.5h15"/>',
+  screen: '<rect x="2" y="3.5" width="16" height="10" rx="1.5"/><path d="M10 13.5v3M6.5 16.5h7"/>',
+  selection: '<path d="M3 5h14M3 9.5h8M3 14h10M14.5 9v8"/>',
+  clipboard: '<rect x="4.5" y="4" width="11" height="13.5" rx="2"/><path d="M7.5 2.5h5v3h-5z"/>',
+  note: '<path d="M4 16l.8-3.5L13 4.3l2.7 2.7-8.2 8.2L4 16z"/><path d="M11.6 5.7l2.7 2.7"/>',
+  record: '<rect x="2.5" y="5.5" width="10" height="9" rx="2"/><path d="M12.5 9l5-3v8l-5-3"/>',
+  pause: '<path d="M7 4.5v11M13 4.5v11"/>',
+  gallery: '<rect x="3" y="3" width="6" height="6" rx="1.3"/><rect x="11" y="3" width="6" height="6" rx="1.3"/><rect x="3" y="11" width="6" height="6" rx="1.3"/><rect x="11" y="11" width="6" height="6" rx="1.3"/>',
+  settings: '<circle cx="10" cy="10" r="2.6"/><path d="M10 2.5v2.2M10 15.3v2.2M2.5 10h2.2M15.3 10h2.2M4.7 4.7l1.5 1.5M13.8 13.8l1.5 1.5M4.7 15.3l1.5-1.5M13.8 6.2l1.5-1.5"/>',
+};
 const WHEEL: [string, string, string][] = [
   ["snip", "Region", "Drag a rectangle on the screen."],
-  ["window", "Window", "The window you were in, as a screenshot."],
+  ["window", "Window", "The window you were in."],
   ["screen", "Screen", "The whole monitor under the cursor."],
-  ["selection", "Selection", "Text, link or image selected in the app you were using."],
-  ["clipboard", "Clipboard", "Whatever you last copied (text, image or files)."],
+  ["selection", "Selection", "What is selected in your app."],
+  ["clipboard", "Clipboard", "Whatever you last copied."],
   ["note", "Note", "Type a quick note."],
-  ["record", "Record", "Record a region as a video clip."],
-  ["board", "Whiteboard", "Open a new whiteboard."],
-  ["pause", "Pause", "Pause or resume the capture hotkey."],
+  ["record", "Record", "Record a region as a clip."],
+  ["pause", "Pause", "Pause or resume the shortcut."],
   ["gallery", "Gallery", "Open the gallery."],
   ["settings", "Settings", "Open these settings."],
 ];
+
 function buildWheel() {
-  const host = $("wheelcard");
-  host.replaceChildren();
-  const title = document.createElement("div");
-  title.className = "set col";
-  title.style.border = "0";
-  title.innerHTML = '<div><div class="lab">Radial wheel</div><div class="hint">Choose what appears when you hold the shortcut. Wedges keep this order, clockwise from the top. Keep at least two.</div></div>';
-  host.append(title);
+  const tiles = el("div", "tiles");
   for (const [id, name, hint] of WHEEL) {
-    const lab = document.createElement("label");
-    lab.className = "switch";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = cfg.wheel_actions.includes(id);
-    cb.addEventListener("change", async () => {
-      const next = WHEEL.map((w) => w[0]).filter((w) => (w === id ? cb.checked : cfg.wheel_actions.includes(w)));
-      try {
-        cfg.wheel_actions = await invoke<string[]>("settings_set_wheel", { actions: next });
-        say("");
-      } catch (e) {
-        cb.checked = !cb.checked;
-        say(String(e), true);
+    const t = el("button", "tile" + (draft.wheel_actions.includes(id) ? " on" : ""));
+    t.innerHTML = `<svg viewBox="0 0 20 20">${ICONS[id]}</svg><span class="ck"></span>`; // static markup
+    t.append(el("b", "", name), el("span", "", hint));
+    t.onclick = () => {
+      const on = draft.wheel_actions.includes(id);
+      if (on && draft.wheel_actions.length <= 2) {
+        t.classList.remove("shake"); void t.offsetWidth; t.classList.add("shake");
+        say("Keep at least two actions on the wheel.", true);
+        return;
       }
-    });
-    lab.append(cb, document.createElement("i"));
-    host.append(row(name, hint, lab));
+      draft.wheel_actions = WHEEL.map((w) => w[0]).filter((w) => (w === id ? !on : draft.wheel_actions.includes(w)));
+      t.classList.toggle("on", !on);
+      commit(true);
+    };
+    tiles.append(t);
   }
+  const g = el("div", "group");
+  g.append(row("Wheel actions", "Hold the shortcut to open the wheel. Wedges keep this order, clockwise from the top. Changes apply right away.", el("span")), tiles);
+  panes.wheel.append(g);
 }
 
-let cfg: Config;
-let hotkey = "";
-let recording = false;
-
-function say(msg: string, err = false) { status.textContent = msg; status.className = err ? "err" : ""; }
-
-/** Shows "Ctrl+Alt+S" as keycap chips. */
-function showKeys(combo: string, rec = false) {
-  keys.replaceChildren();
-  keys.classList.toggle("rec", rec);
-  if (rec) { const s = document.createElement("span"); s.className = "rect"; s.textContent = "Press the new shortcut…"; keys.append(s); return; }
-  for (const k of combo.split("+")) {
-    const e = document.createElement("kbd");
-    e.textContent = k === "Super" ? "Win" : k;
-    keys.append(e);
-  }
+// ---------- recording ----------
+function buildRecording() {
+  const fps = sliderRow("Frame rate", "Lower means smaller files and less CPU.", { min: 10, max: 60, step: 5, value: draft.rec_fps, fmt: (v) => `${v} fps`, onInput: (v) => (draft.rec_fps = v) });
+  const max = sliderRow("Maximum clip length", "Recording stops by itself after this long.", { min: 0, max: 3600, stops: [0, 30, 60, 120, 300, 600, 900, 1800, 3600], value: draft.rec_max_secs, fmt: clipLen, onInput: (v) => (draft.rec_max_secs = v) });
+  panes.recording.append(
+    ...group("Audio",
+      row("Record system audio", "Clips include what you hear (desktop audio).", toggle(draft.rec_system_audio, (v) => (draft.rec_system_audio = v))),
+      row("Record microphone", "Clips include your default microphone.", toggle(draft.rec_mic, (v) => (draft.rec_mic = v)))),
+    ...group("Video", fps.row, max.row),
+  );
 }
 
-async function init() {
-  const d = await invoke<Dto>("settings_get");
-  cfg = d.config;
-  hotkey = cfg.hotkey;
-  showKeys(hotkey);
-  holdr.value = String(Math.min(600, cfg.hold_ms));
-  holdv.textContent = holdr.value;
-  lib.value = cfg.library_path;
-  autostart.checked = cfg.autostart;
-  ocr.checked = cfg.ocr;
-  popup.checked = cfg.show_popup;
-  url.checked = cfg.capture_url;
-  if (!d.autostart_supported) {
-    autostart.disabled = true;
-    $("autohint").textContent = "Only applies to the installed (release) build.";
-  }
-  markTheme(cfg.theme);
-  setGlass(cfg.glass, false);
-  recsys.checked = cfg.rec_system_audio;
-  recmic.checked = cfg.rec_mic;
-  recfps.value = String(cfg.rec_fps);
-  recfpsv.textContent = recfps.value;
-  recmax.value = String(cfg.rec_max_secs);
-  buildAppearance();
-  buildWheel();
-  $("ver").textContent = `Stash ${d.version}`;
+// ---------- general ----------
+function buildGeneral() {
+  const f = el("div", "folder ctl");
+  const lib = el("input", "field");
+  lib.type = "text";
+  lib.value = draft.library_path;
+  lib.spellcheck = false;
+  // the folder is applied when editing is done (Enter or leaving the field), never per keystroke
+  lib.addEventListener("change", () => { draft.library_path = lib.value.trim(); commit(true); });
+  const browse = el("button", "btn", "Browse…");
+  browse.onclick = async () => {
+    modalUntilFocus();
+    const dir = await open({ directory: true, defaultPath: lib.value || undefined });
+    if (typeof dir === "string") { lib.value = dir; draft.library_path = dir; commit(true); }
+  };
+  f.append(lib, browse);
+  panes.general.append(
+    ...group("Library",
+      row("Library folder", "A OneDrive or Dropbox folder keeps it synced. Only new captures go to a new folder; move old files yourself.", f, { stack: true }),
+      row("Search text inside images", "Reads text in screenshots with the OCR built into Windows, on this PC only.", toggle(draft.ocr, (v) => (draft.ocr = v))),
+      row("Record page URL from browsers", "Reads the address bar through Windows UI Automation. Chromium browsers may load pages slightly slower.", toggle(draft.capture_url, (v) => (draft.capture_url = v)))),
+    ...group("System",
+      row("Start with Windows", autostartSupported ? "Runs quietly in the tray at sign-in." : "Only applies to the installed (release) build.", toggle(draft.autostart, (v) => (draft.autostart = v), !autostartSupported))),
+  );
 }
-// ---- theme (applies immediately) ----
-function markTheme(t: string) {
-  document.body.classList.toggle("is-glass", t === "glass"); document.querySelectorAll<HTMLElement>(".th").forEach((b) => b.classList.toggle("on", b.dataset.t === t)); }
-$("themes").addEventListener("click", async (e) => {
-  const b = (e.target as HTMLElement).closest<HTMLElement>(".th");
-  if (!b) return;
-  cfg.theme = b.dataset.t!;
-  markTheme(cfg.theme);
-  await invoke("settings_set_theme", { theme: cfg.theme });
-});
 
-// ---- liquid glass colours (apply live) ----
-const PRESETS: [string, string[]][] = [
+// ---------- appearance ----------
+type ADef = [keyof Appearance & string, string, string, number, number, number, string];
+// Gallery and settings (backdrop.rs draws the blur behind the page, so this window shows changes live)
+const WIN_LOOK: ADef[] = [
+  ["win_blur", "Blur", "0 = clear. Up to 30 px the frost fades in over the sharp view behind; above 30 it gets softer.", 0, 60, 1, "px"],
+  ["win_translucency", "Translucency", "How thin the dark tint is.", 0, 100, 1, "%"],
+  ["win_saturation", "Saturation", "Colour boost of what shows through.", 100, 250, 5, "%"],
+];
+// Wheel, tag menu, quick note and toasts (drawn natively; see the preview)
+const NATIVE_LOOK: ADef[] = [
+  ["glass_blur", "Blur", "0 = the screen shows through sharp.", 0, 60, 1, "px"],
+  ["glass_translucency", "Translucency", "How thin the dark tint is.", 0, 100, 1, "%"],
+  ["glass_saturation", "Saturation", "Colour boost of the blurred background.", 100, 250, 5, "%"],
+];
+const SHEEN: ADef = ["glass_tint", "Colour sheen", "How strongly the glass colours tint every glass surface.", 0, 100, 1, "%"];
+const WHEEL_LOOK: ADef[] = [
+  ["wheel_size", "Size", "", 60, 160, 5, "%"],
+  ["wheel_hole", "Centre size", "Radius of the dead zone in the middle.", 20, 80, 1, "px"],
+  ["wheel_gap", "Slice gap", "", 0, 14, 1, "px"],
+  ["wheel_opacity", "Opacity", "", 30, 100, 1, "%"],
+];
+const UI_LOOK: ADef[] = [
+  ["ui_font", "Text size", "", 11, 18, 1, "px"],
+  ["ui_radius", "Corner roundness", "", 0, 20, 1, "px"],
+];
+const glassLook = (blur: number, tr: number, sat: number) =>
+  ({ win_blur: blur, win_translucency: tr, win_saturation: sat, glass_blur: blur, glass_translucency: tr, glass_saturation: sat });
+const PRESETS: [string, Partial<Appearance>][] = [
+  ["Default", { ...glassLook(30, 70, 150), glass_tint: 20, wheel_size: 100, wheel_hole: 40, wheel_gap: 5, wheel_opacity: 100, ui_font: 13, ui_radius: 12 }],
+  ["Veil", { ...glassLook(6, 92, 140), glass_tint: 15 }],
+  ["Crystal", { ...glassLook(40, 88, 180), glass_tint: 10 }],
+  ["Frosted", { ...glassLook(50, 25, 130), glass_tint: 25 }],
+  ["Clear", { ...glassLook(0, 85, 100), glass_tint: 10 }],
+  ["Compact", { wheel_size: 80, wheel_hole: 30, ui_font: 12, ui_radius: 8 }],
+  ["Big & soft", { wheel_size: 130, wheel_gap: 8, ui_font: 15, ui_radius: 18 }],
+];
+const GLASS: [string, string[]][] = [
+  ["Cool", ["#8fa6ff", "#b59cff", "#7fd6e6"]],
   ["Aurora", ["#5a78ff", "#be5aff", "#3cdcc8"]],
   ["Sunset", ["#ff7a59", "#ff3d81", "#ffc65a"]],
   ["Ocean", ["#2d9cff", "#1fd1c1", "#5a5cff"]],
   ["Rose", ["#ff8fb1", "#c27bff", "#ffd0a8"]],
   ["Mono", ["#9aa4b8", "#6b7388", "#c9d1e3"]],
 ];
-const gIn = [$<HTMLInputElement>("ga"), $<HTMLInputElement>("gb"), $<HTMLInputElement>("gc")];
-let gTimer: number | undefined;
-function setGlass(cols: string[], save = true) {
-  cols.forEach((c, i) => (gIn[i].value = c));
-  $("gprev").style.background = `linear-gradient(90deg, ${cols[0]}, ${cols[1]}, ${cols[2]})`;
-  if (!save) return;
-  cfg.glass = cols;
-  clearTimeout(gTimer);
-  gTimer = window.setTimeout(() => invoke("settings_set_glass", { colors: cols }).catch((e) => say(String(e), true)), 150);
-}
-gIn.forEach((el) => el.addEventListener("input", () => setGlass(gIn.map((x) => x.value))));
-$("greset").addEventListener("click", () => setGlass(PRESETS[0][1]));
-for (const [name, cols] of PRESETS) {
-  const b = document.createElement("button");
-  b.className = "pr";
-  b.style.background = `linear-gradient(135deg, ${cols[0]}, ${cols[1]}, ${cols[2]})`;
-  b.title = name;
-  const sp = document.createElement("span");
-  sp.textContent = name;
-  b.append(sp);
-  b.addEventListener("click", () => setGlass(cols));
-  $("gpresets").append(b);
+
+function buildAppearance() {
+  const sliders: Record<string, Slider> = {};
+  const mk = (d: ADef) => {
+    const [k, label, hint, min, max, step, unit] = d;
+    const r = sliderRow(label, hint, { min, max, step, value: Number(draft.appearance[k]), fmt: (v) => `${v} ${unit}`, onInput: (v) => { draft.appearance[k] = v; } });
+    sliders[k] = r.s;
+    return r.row;
+  };
+  const presets = el("div", "presets");
+  for (const [name, p] of PRESETS) {
+    const b = el("button", "chip", name);
+    b.onclick = () => { Object.assign(draft.appearance, p); for (const k in p) sliders[k]?.set(Number(draft.appearance[k])); commit(true); };
+    presets.append(b);
+  }
+
+  // glass colours: three round swatches + a gradient preview + presets
+  const sws = el("div", "swatches ctl");
+  const inputs: HTMLInputElement[] = [];
+  const gprev = el("div", "gprev");
+  const paintGlass = () => {
+    draft.glass.forEach((c, i) => { inputs[i].value = c; (inputs[i].parentElement as HTMLElement).style.background = c; });
+    gprev.style.background = `linear-gradient(90deg, ${draft.glass.join(", ")})`;
+  };
+  for (let i = 0; i < 3; i++) {
+    const w = el("label", "sw");
+    const inp = el("input");
+    inp.type = "color";
+    inp.addEventListener("click", modalUntilFocus);
+    inp.addEventListener("input", () => { draft.glass[i] = inp.value; paintGlass(); commit(); });
+    inputs.push(inp);
+    w.append(inp);
+    sws.append(w);
+  }
+  sws.append(gprev);
+  const gpre = el("div", "presets");
+  for (const [name, cols] of GLASS) {
+    const b = el("button", "chip", name);
+    b.style.backgroundImage = `linear-gradient(90deg, ${cols.map((c) => c + "40").join(", ")})`;
+    b.onclick = () => { draft.glass = [...cols]; paintGlass(); commit(true); };
+    gpre.append(b);
+  }
+  paintGlass();
+
+  // hover colour
+  const hov = el("div", "ctl inline");
+  const hw = el("label", "sw");
+  const hc = el("input");
+  hc.type = "color";
+  hc.addEventListener("click", modalUntilFocus);
+  hc.value = draft.appearance.hover_color || "#4a7dff";
+  hw.style.background = hc.value;
+  hc.addEventListener("input", () => { draft.appearance.hover_color = hc.value; hw.style.background = hc.value; commit(); });
+  hw.append(hc);
+  const acc = el("button", "btn", "Use Windows accent");
+  acc.onclick = async () => {
+    draft.appearance.hover_color = "";
+    commit(true);
+    await flush();
+    // show the colour now in use (theme.ts sets --accent from the Windows accent)
+    setTimeout(() => {
+      const a = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+      if (/^#[0-9a-f]{6}$/i.test(a)) { hc.value = a; hw.style.background = a; }
+    }, 120);
+  };
+  hov.append(hw, acc);
+
+  const pv = el("div", "pv");
+  pv.append(previewImg);
+  panes.appearance.append(
+    ...group("Presets", presets),
+    ...group("Everywhere",
+      row("Glass colours", "The sheen on panels, the wheel and the tag menu.", sws, { stack: true }), gpre,
+      mk(SHEEN),
+      row("Hover and selection colour", "Wheel highlight, selected items and switches.", hov),
+      row("Animations", "Turn off for instant, motion-free UI.", toggle(draft.appearance.animations, (v) => (draft.appearance.animations = v)))),
+    ...group("Gallery and settings windows", ...WIN_LOOK.map(mk), ...UI_LOOK.map(mk)),
+    ...group("Wheel, tag menu and note", pv, ...NATIVE_LOOK.map(mk)),
+    ...group("Wheel shape", ...WHEEL_LOOK.map(mk)),
+  );
 }
 
-holdr.addEventListener("input", () => (holdv.textContent = holdr.value));
-
-// ---- shortcut recorder ----
+// ---------- shortcut recorder ----------
 const NAMED: Record<string, string> = { Space: "Space", ArrowUp: "ArrowUp", ArrowDown: "ArrowDown", ArrowLeft: "ArrowLeft", ArrowRight: "ArrowRight", Enter: "Enter", Tab: "Tab", Backquote: "`", Minus: "-", Equal: "=" };
 function keyName(code: string): string | null {
   let m;
@@ -260,71 +501,110 @@ function keyName(code: string): string | null {
   if (/^F\d{1,2}$/.test(code)) return code;
   return NAMED[code] ?? null;
 }
-
 async function stopRecording() {
+  if (!recording) return;
   recording = false;
-  showKeys(hotkey);
+  showKeys(draft.hotkey);
   recBtn.textContent = "Change";
   await invoke("hotkey_suspend", { suspend: false });
 }
-
 recBtn.addEventListener("click", async () => {
   if (recording) { await stopRecording(); return; }
   recording = true;
   await invoke("hotkey_suspend", { suspend: true }); // so pressing the live shortcut doesn't trigger a snip
   showKeys("", true);
   recBtn.textContent = "Cancel";
-  say("");
 });
+
+// ---------- close ----------
+async function closeWindow() {
+  await stopRecording();
+  await flush(); // never lose the last change
+  $("app").classList.add("out");
+  await new Promise((r) => setTimeout(r, 140));
+  invoke("settings_close");
+}
 
 window.addEventListener("keydown", async (e) => {
-  if (!recording) return;
-  e.preventDefault();
-  if (e.key === "Escape") { await stopRecording(); return; }
-  const k = keyName(e.code);
-  if (!k) return; // a bare modifier or unsupported key: keep waiting
-  const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super"].filter(Boolean) as string[];
-  if (!mods.length) { say("Include at least one modifier (Ctrl, Alt, Shift or Win).", true); return; }
-  hotkey = [...mods, k].join("+");
-  say("");
-  await stopRecording();
-});
-window.addEventListener("blur", () => { if (recording) stopRecording(); });
-
-// ---- folder + save ----
-$("browse").addEventListener("click", async () => {
-  const dir = await open({ directory: true, defaultPath: lib.value || undefined });
-  if (typeof dir === "string") lib.value = dir;
-});
-
-$("save").addEventListener("click", async () => {
-  if (recording) return;
-  const next: Config = {
-    library_path: lib.value.trim(),
-    hotkey,
-    hold_ms: Math.round(Number(holdr.value) || cfg.hold_ms),
-    capture_url: url.checked,
-    show_popup: popup.checked,
-    autostart: autostart.checked,
-    theme: cfg.theme,
-    glass: cfg.glass,
-    ocr: ocr.checked,
-    appearance: cfg.appearance,
-    rec_system_audio: recsys.checked,
-    rec_mic: recmic.checked,
-    rec_fps: Math.round(Number(recfps.value) || 30),
-    rec_max_secs: Math.max(0, Math.round(Number(recmax.value) || 0)),
-    wheel_actions: cfg.wheel_actions,
-  };
-  if (!next.library_path) { say("Choose a library folder.", true); return; }
-  try {
-    cfg = await invoke<Config>("settings_save", { new: next });
-    hotkey = cfg.hotkey;
-    showKeys(hotkey);
-    say("Saved.");
-  } catch (err) {
-    say(String(err), true);
+  if (recording) {
+    e.preventDefault();
+    if (e.key === "Escape") { await stopRecording(); return; }
+    const k = keyName(e.code);
+    if (!k) return; // a bare modifier or unsupported key: keep waiting
+    const mods = [e.ctrlKey && "Ctrl", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Super"].filter(Boolean) as string[];
+    if (!mods.length) { say("Include at least one modifier (Ctrl, Alt, Shift or Win).", true); return; }
+    draft.hotkey = [...mods, k].join("+");
+    await stopRecording();
+    commit(true);
+    return;
   }
+  if (e.key === "Escape") { e.preventDefault(); closeWindow(); }
+});
+// Clicking outside the window closes it (changes are already saved). Our own native dialogs (folder picker,
+// colour pickers) also take focus, so they suspend this until the window has focus again.
+let modal = false;
+function modalUntilFocus() { modal = true; }
+window.addEventListener("focus", () => (modal = false));
+window.addEventListener("blur", () => {
+  if (recording) { stopRecording(); return; }
+  setTimeout(() => { if (!document.hasFocus() && !modal && opened) closeWindow(); }, 120);
+});
+window.addEventListener("resize", moveIndicator);
+
+// ---------- Appearance preview (the native glass, rendered by Rust over a desktop snapshot) ----------
+const previewImg = el("img");
+previewImg.alt = "Glass preview";
+let pvTimer: number | undefined;
+let pvUrl = "";
+function refreshPreview() {
+  if (!draft || current !== "appearance") return;
+  clearTimeout(pvTimer);
+  pvTimer = window.setTimeout(async () => {
+    try {
+      const buf = await invoke<ArrayBuffer>("appearance_preview", { appearance: draft.appearance, glass: draft.glass });
+      const url = URL.createObjectURL(new Blob([buf], { type: "image/png" }));
+      previewImg.onload = () => { if (pvUrl) URL.revokeObjectURL(pvUrl); pvUrl = url; };
+      previewImg.src = url;
+    } catch { /* preview is best-effort */ }
+  }, 90);
+}
+
+window.addEventListener("beforeunload", () => { if (pending) invoke("settings_save", { new: draft }); });
+$("appBtn").addEventListener("click", () => {
+  const on = tabBtns.appearance.style.display === "none";
+  showAppearanceTab(on);
+  if (on) select("appearance");
 });
 
-init();
+async function init() {
+  const d = await invoke<Dto>("settings_get");
+  draft = structuredClone(d.config);
+  saved = structuredClone(d.config);
+  autostartSupported = d.autostart_supported;
+  buildTabs();
+  buildCapture();
+  buildWheel();
+  buildRecording();
+  buildGeneral();
+  buildAppearance();
+  let showApp = false;
+  try { showApp = localStorage.getItem("stash.settings.appearance") === "1"; } catch { /* storage unavailable */ }
+  showAppearanceTab(showApp);
+  select("capture");
+  // the window is created hidden: show it once this first frame is ready, then play the entrance
+  // (title drops in, the tab bar pops, groups cascade, footer rises)
+  document.querySelectorAll<HTMLElement>(".pane.on > *").forEach((e, i) => e.style.setProperty("--i", String(Math.min(i, 10))));
+  // (a hidden page gets no animation frames: reveal first, animate on the first visible frame)
+  moveIndicator();
+  invoke("window_ready").catch(() => {});
+  requestAnimationFrame(() => {
+    moveIndicator();
+    $("app").classList.add("in");
+    document.body.classList.remove("pre");
+    document.body.classList.add("opening");
+    setTimeout(() => { document.body.classList.remove("opening"); opened = true; }, 900);
+  });
+  document.fonts?.ready.then(moveIndicator);
+}
+
+init().catch((e) => say(String(e), true));

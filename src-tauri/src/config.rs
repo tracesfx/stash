@@ -15,17 +15,15 @@ pub struct Config {
     /// Read the browser address bar (UI Automation) to record the source URL. Note: querying UI Automation
     /// makes Chromium browsers enable their accessibility tree, which costs some page-load speed.
     pub capture_url: bool,
-    /// Show the confirmation popup after captures.
-    pub show_popup: bool,
+    /// Show the tag radial after captures (otherwise a small confirmation toast).
+    pub tag_menu: bool,
     /// Start with Windows (applied for installed/release builds only).
     pub autostart: bool,
-    /// system | light | dark | glass
-    pub theme: String,
-    /// Liquid Glass gradient colours (3 hex stops).
+    /// Liquid Glass sheen colours (3 hex stops).
     pub glass: Vec<String>,
     /// Index text inside images with the built-in Windows OCR (local).
     pub ocr: bool,
-    /// Look & feel knobs (glass, wheel, popup, fonts).
+    /// Look & feel knobs (glass, wheel, fonts, note/toast corner).
     pub appearance: Appearance,
     /// Record system audio / microphone into video clips.
     pub rec_system_audio: bool,
@@ -35,17 +33,29 @@ pub struct Config {
     pub rec_max_secs: u32,
     /// Wheel wedges that are shown (ids from `wheel::Action::id`). The wheel lays them out in a fixed order.
     pub wheel_actions: Vec<String>,
+    /// Look revision. Missing in configs written before M6 (reads as 0), which then get the new glass defaults.
+    #[serde(default)]
+    pub style_rev: u32,
 }
+
+/// Current look revision (M6: neutral Liquid Glass only).
+pub const STYLE_REV: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Appearance {
-    /// 0 = frosted/opaque .. 100 = nearly clear (Liquid Glass).
+    /// Native glass (wheel, tag menu, note, toast). Tint density: 0 = dense .. 100 = thin.
     pub glass_translucency: u8,
-    /// Backdrop blur strength, 0..60.
+    /// Native glass backdrop blur, 0..60 (0 = the screen shows through sharp).
     pub glass_blur: u8,
-    /// Backdrop saturation %, 100..250.
+    /// Native glass backdrop saturation %, 100..250.
     pub glass_saturation: u8,
+    /// Window glass (gallery, settings): tint density, 0 = dense .. 100 = thin.
+    pub win_translucency: u8,
+    /// Window glass blur, 0..60 (0 = transparent; drawn by backdrop.rs, Acrylic if that is unavailable).
+    pub win_blur: u8,
+    /// Window glass saturation %, 100..250.
+    pub win_saturation: u8,
     /// Strength of the gradient colour wash, 0..100.
     pub glass_tint: u8,
     /// Hover/selection colour (#rrggbb); empty = Windows accent.
@@ -62,31 +72,35 @@ pub struct Appearance {
     pub ui_font: u8,
     /// Corner roundness (px for medium radius), 0..20.
     pub ui_radius: u8,
-    /// Confirmation popup corner: br | bl | tr | tl.
+    /// Screen corner for the quick note and toasts: br | bl | tr | tl.
     pub popup_corner: String,
-    /// How long the popup stays (ms).
-    pub popup_ms: u32,
     /// UI animations on/off.
     pub animations: bool,
+    /// Legacy (style_rev < 3) Transparent switch; read once by `Config::migrate`, never written.
+    #[serde(skip_serializing)]
+    pub glass_clear: bool,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            glass_translucency: 75,
-            glass_blur: 26,
-            glass_saturation: 170,
-            glass_tint: 50,
+            glass_translucency: 70,
+            glass_blur: 30,
+            glass_saturation: 150,
+            win_translucency: 70,
+            win_blur: 30,
+            win_saturation: 150,
+            glass_tint: 20,
             hover_color: String::new(),
             wheel_size: 100,
             wheel_hole: 40,
             wheel_gap: 5,
             wheel_opacity: 100,
             ui_font: 13,
-            ui_radius: 10,
+            ui_radius: 12,
             popup_corner: "br".into(),
-            popup_ms: 1500,
             animations: true,
+            glass_clear: false,
         }
     }
 }
@@ -96,6 +110,9 @@ impl Appearance {
         self.glass_translucency = self.glass_translucency.min(100);
         self.glass_blur = self.glass_blur.min(60);
         self.glass_saturation = self.glass_saturation.clamp(100, 250);
+        self.win_translucency = self.win_translucency.min(100);
+        self.win_blur = self.win_blur.min(60);
+        self.win_saturation = self.win_saturation.clamp(100, 250);
         self.glass_tint = self.glass_tint.min(100);
         self.wheel_size = self.wheel_size.clamp(60, 160);
         self.wheel_hole = self.wheel_hole.clamp(20, 80);
@@ -103,7 +120,6 @@ impl Appearance {
         self.wheel_opacity = self.wheel_opacity.clamp(30, 100);
         self.ui_font = self.ui_font.clamp(11, 18);
         self.ui_radius = self.ui_radius.min(20);
-        self.popup_ms = self.popup_ms.clamp(600, 15000);
         if !matches!(self.popup_corner.as_str(), "br" | "bl" | "tr" | "tl") {
             self.popup_corner = "br".into();
         }
@@ -121,9 +137,8 @@ impl Default for Config {
             hotkey: "Ctrl+Alt+S".into(),
             hold_ms: 200,
             capture_url: true,
-            show_popup: true,
+            tag_menu: true,
             autostart: true,
-            theme: "system".into(),
             ocr: true,
             appearance: Appearance::default(),
             rec_system_audio: false,
@@ -132,6 +147,7 @@ impl Default for Config {
             rec_max_secs: 300,
             wheel_actions: crate::wheel::default_ids(),
             glass: crate::theme::DEFAULT_GLASS.iter().map(|s| s.to_string()).collect(),
+            style_rev: STYLE_REV,
         }
     }
 }
@@ -150,7 +166,14 @@ impl Config {
         std::fs::create_dir_all(&dir).context("create app dir")?;
         let path = dir.join("config.json");
         let cfg = match std::fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str(&s).context("parse config.json")?,
+            Ok(s) => {
+                // tolerate a UTF-8 BOM (some editors add one)
+                let mut c: Config = serde_json::from_str(s.trim_start_matches('\u{feff}')).context("parse config.json")?;
+                if c.migrate() {
+                    c.save()?;
+                }
+                c
+            }
             Err(_) => {
                 let c = Config::default();
                 c.save()?;
@@ -159,6 +182,43 @@ impl Config {
         };
         std::fs::create_dir_all(&cfg.library_path).context("create library dir")?;
         Ok(cfg)
+    }
+
+    /// Upgrades older configs. Returns true when something changed.
+    fn migrate(&mut self) -> bool {
+        let mut changed = false;
+        if self.style_rev < STYLE_REV {
+            // M6: the colourful glass wash and System/Light/Dark themes are gone; start from the new neutral look
+            let d = Appearance::default();
+            let a = &mut self.appearance;
+            (a.glass_translucency, a.glass_blur, a.glass_saturation, a.glass_tint, a.ui_radius) =
+                (d.glass_translucency, d.glass_blur, d.glass_saturation, d.glass_tint, d.ui_radius);
+            self.glass = crate::theme::DEFAULT_GLASS.iter().map(|s| s.to_string()).collect();
+            self.style_rev = 2;
+            changed = true;
+        }
+        if self.style_rev < 3 {
+            // window and native glass got separate knobs; blur 0 replaces the Transparent switch
+            let a = &mut self.appearance;
+            a.win_translucency = a.glass_translucency;
+            a.win_saturation = a.glass_saturation;
+            a.win_blur = if a.glass_clear { 0 } else { 30 };
+            if a.glass_clear {
+                a.glass_blur = 0;
+            }
+            a.glass_clear = false;
+            self.style_rev = STYLE_REV;
+            changed = true;
+        }
+        let before = self.wheel_actions.len();
+        self.wheel_actions.retain(|a| a != "board"); // whiteboard removed in M6
+        if self.wheel_actions.len() != before {
+            if self.wheel_actions.len() < 2 {
+                self.wheel_actions = crate::wheel::default_ids();
+            }
+            changed = true;
+        }
+        changed
     }
 
     /// Atomic save: temp file + rename.

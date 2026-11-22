@@ -1,2 +1,2 @@
-// M0 placeholder. The idle app has no windows; UI windows (overlay, popup, gallery) arrive in M1+.
+// Placeholder entry. The idle app has no windows; web windows are gallery.html and settings.html.
 export {};

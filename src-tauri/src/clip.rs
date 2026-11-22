@@ -97,7 +97,7 @@ pub fn copy_selection() -> Result<Option<Clip>> {
 }
 
 /// Saves clipboard-like content into the library. Files are copied one by one; the last one is returned
-/// (the popup shows one preview) together with how many were saved.
+/// (the tag radial shows one preview) together with how many were saved.
 pub fn save(root: &std::path::Path, clip: Clip, method: &'static str, source: &crate::winutil::SourceInfo) -> Result<(Vec<crate::library::Saved>, usize)> {
     use crate::library;
     match clip {

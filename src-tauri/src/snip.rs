@@ -14,7 +14,8 @@ use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 use crate::wheel::{self, Action};
 use crate::winutil::{self, Frame, SourceInfo};
-use crate::{clip, gallery, library, note, overlay, popup, uia, AppState};
+use crate::radial::{self, Request};
+use crate::{clip, gallery, library, note, overlay, toast, uia, AppState};
 
 /// The frozen desktop frame, grabbed on a background thread at key-down and shared (read-only) by the wheel
 /// (for the glass backdrop) and the capture that follows.
@@ -26,7 +27,9 @@ impl FrameCell {
         let cell = FrameCell(Arc::new((Mutex::new(None), Condvar::new())));
         let c2 = cell.clone();
         std::thread::spawn(move || {
+            let t0 = Instant::now();
             let r = winutil::grab_virtual_screen().map(Arc::new).map_err(|e| format!("{e:#}"));
+            tracing::info!("screen grab {} ms", t0.elapsed().as_millis());
             *c2.0 .0.lock().unwrap() = Some(r);
             c2.0 .1.notify_all();
         });
@@ -202,17 +205,13 @@ fn perform(app: &AppHandle, action: Action, p: Pending) {
         }
         Action::Selection => run_clip(app, true, with_url(p.url, p.source)),
         Action::Clipboard => run_clip(app, false, with_url(p.url, p.source)),
-        Action::Board => {
-            crate::board::open(app, None);
-            Ok(())
-        }
         Action::Pause => {
             let st = app.state::<AppState>();
             let now = !st.paused.load(Ordering::Relaxed);
             st.paused.store(now, Ordering::Relaxed);
             crate::tray::sync_pause(app, now);
             tracing::info!("paused = {now} (wheel)");
-            popup::notice(app, if now { "Capture paused" } else { "Capture resumed" });
+            toast::notice(app, if now { "Capture paused" } else { "Capture resumed" });
             Ok(())
         }
         Action::Settings => {
@@ -226,7 +225,7 @@ fn perform(app: &AppHandle, action: Action, p: Pending) {
     };
     if let Err(e) = r {
         tracing::error!("{action:?} failed: {e:#}");
-        popup::notice(app, "Capture failed — see log");
+        toast::notice(app, "Capture failed — see log");
     }
 }
 
@@ -235,13 +234,13 @@ fn library_root(app: &AppHandle) -> std::path::PathBuf {
 }
 
 /// Crop a rect (virtual-desktop coords) out of the frozen frame and save it. Runs on its own thread so the
-/// next capture is never blocked by PNG encoding.
+/// next capture is never blocked by PNG encoding. The frame stays alive until the tag radial has used it as
+/// its glass backdrop.
 fn save_crop(app: &AppHandle, frame: Arc<Frame>, rect: RECT, source: SourceInfo, method: &'static str) -> Result<()> {
     let app = app.clone();
     std::thread::spawn(move || {
         let t0 = Instant::now();
         let (rgba, w, h) = frame.crop_rgba(rect);
-        drop(frame);
         if w == 0 || h == 0 {
             tracing::error!("empty capture rect");
             return;
@@ -252,15 +251,16 @@ fn save_crop(app: &AppHandle, frame: Arc<Frame>, rect: RECT, source: SourceInfo,
             monitor: winutil::monitor_at((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2),
             rect: [rect.left, rect.top, w as i32, h as i32],
         };
+        let hwnd = meta.source.hwnd;
         match library::save_image(&library_root(&app), &rgba, w, h, meta) {
             Ok(saved) => {
                 tracing::info!("saved {method} {w}x{h} in {} ms", t0.elapsed().as_millis());
                 crate::ocr::spawn(&app, saved.sidecar.clone());
-                popup::show(&app, Some(saved.sidecar), saved.preview, saved.meta);
+                radial::show(&app, Request { sidecars: vec![saved.sidecar], preview: saved.preview, meta: saved.meta, source_hwnd: hwnd, frame: Some(frame) });
             }
             Err(e) => {
                 tracing::error!("save {method} failed: {e:#}");
-                popup::notice(&app, "Capture failed — see log");
+                toast::notice(&app, "Capture failed — see log");
             }
         }
     });
@@ -295,7 +295,7 @@ fn run_record(app: &AppHandle, p: Pending) -> Result<()> {
 fn run_clip(app: &AppHandle, selection: bool, source: SourceInfo) -> Result<()> {
     let (got, method) = if selection { (clip::copy_selection()?, "selection") } else { (clip::read(), "clipboard") };
     let Some(got) = got else {
-        popup::notice(app, if selection { "Nothing selected" } else { "Clipboard is empty" });
+        toast::notice(app, if selection { "Nothing selected" } else { "Clipboard is empty" });
         return Ok(());
     };
     let (saved, n) = clip::save(&library_root(app), got, method, &source)?;
@@ -304,9 +304,10 @@ fn run_clip(app: &AppHandle, selection: bool, source: SourceInfo) -> Result<()> 
             crate::ocr::spawn(app, s.sidecar.clone());
         }
     }
+    let sidecars: Vec<_> = saved.iter().map(|s| s.sidecar.clone()).collect();
     if let Some(last) = saved.into_iter().last() {
         let meta = if n > 1 { format!("{} files · {}", n, last.meta) } else { last.meta };
-        popup::show(app, Some(last.sidecar), last.preview, meta);
+        radial::show(app, Request { sidecars, preview: last.preview, meta, source_hwnd: source.hwnd, frame: None });
     }
     Ok(())
 }

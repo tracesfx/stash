@@ -59,14 +59,13 @@ pub fn build(app: &AppHandle, hotkey_ok: bool) -> tauri::Result<()> {
     app.manage(StatusItem(status.clone()));
     let gallery = MenuItem::with_id(app, "gallery", "Open gallery", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
-    let board = MenuItem::with_id(app, "board", "New whiteboard", true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "Open library folder", true, None::<&str>)?;
     let pause = CheckMenuItem::with_id(app, "pause", "Pause capture", true, false, None::<&str>)?;
     app.manage(PauseItem(pause.clone()));
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let sep1 = PredefinedMenuItem::separator(app)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&status, &sep1, &gallery, &board, &folder, &settings, &pause, &sep2, &quit])?;
+    let menu = Menu::with_items(app, &[&status, &sep1, &gallery, &folder, &settings, &pause, &sep2, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip(format!("Stash — {status_text}"))
@@ -80,7 +79,6 @@ pub fn build(app: &AppHandle, hotkey_ok: bool) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "gallery" => crate::gallery::open(app),
             "settings" => crate::settings::open(app),
-            "board" => crate::board::open(app, None),
             "folder" => {
                 let path = app.state::<AppState>().cfg().library_path;
                 if let Err(e) = app.opener().open_path(path.to_string_lossy(), None::<&str>) {
@@ -93,6 +91,7 @@ pub fn build(app: &AppHandle, hotkey_ok: bool) -> tauri::Result<()> {
                 st.paused.store(now, Ordering::Relaxed);
                 set_tray_icon(app, if now { "paused" } else { "normal" });
                 tracing::info!("paused = {now}");
+                crate::toast::notice(app, if now { "Capture paused" } else { "Capture resumed" });
             }
             "quit" => app.exit(0),
             _ => {}

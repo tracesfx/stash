@@ -53,8 +53,6 @@ pub struct ItemDto {
     board: Option<String>,
     /// Text recognised inside the image (OCR), for search.
     ocr: Option<String>,
-    /// Whiteboard with an editable scene next to the PNG.
-    scene: bool,
 }
 
 fn root(app: &AppHandle) -> PathBuf {
@@ -134,7 +132,6 @@ fn scan(root: &Path, ocr_on: bool) -> (Vec<ItemDto>, HashMap<String, Entry>) {
                 palette: v["palette"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect()).unwrap_or_default(),
                 board: v["board"].as_str().filter(|b| !b.is_empty()).map(String::from),
                 ocr: v["ocr"].as_str().filter(|t| !t.is_empty()).map(|t| t.chars().take(4000).collect()),
-                scene: content.with_extension("board").exists(),
             });
             map.insert(id, Entry { content, sidecar: sp, needs });
         }
@@ -183,23 +180,50 @@ pub fn open(app: &AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {
         if let Some(w) = app.get_webview_window("gallery") {
-            let _ = w.unminimize();
-            let _ = w.show();
-            let _ = w.set_focus();
+            if let Ok(h) = w.hwnd() {
+                crate::winutil::bring_to_front(h.0 as isize);
+            }
             return;
         }
-        let built = WebviewWindowBuilder::new(&app, "gallery", WebviewUrl::App("gallery.html".into()))
+        let b = WebviewWindowBuilder::new(&app, "gallery", WebviewUrl::App("gallery.html".into()))
             .title("Stash")
             .inner_size(1180.0, 780.0)
             .min_inner_size(640.0, 420.0)
             .disable_drag_drop_handler() // HTML5 drops (text, links, browser files) are handled by the page
-            .transparent(true) // the backdrop (Mica/Acrylic) shows through the translucent page
-            .effects(crate::theme::builder_effects(&app.state::<AppState>().cfg()))
-            .build();
-        if let Err(e) = built {
-            tracing::error!("gallery window: {e}");
+            .transparent(true) // the backdrop (theme::style_window) shows through the translucent page
+            .visible(false); // shown by `window_ready` once the page has painted, so it opens with its animation
+        match b.build() {
+            Ok(w) => {
+                crate::theme::style_window(&w, &app.state::<AppState>().cfg());
+                show_if_not_ready(w)
+            }
+            Err(e) => tracing::error!("gallery window: {e}"),
         }
     });
+}
+
+/// Safety net for windows created hidden: if the page never calls `window_ready`, show it anyway.
+pub fn show_if_not_ready(w: tauri::WebviewWindow) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        if !w.is_visible().unwrap_or(true) {
+            tracing::warn!("{} did not report ready; showing it", w.label());
+            reveal(&w);
+        }
+    });
+}
+
+fn reveal(w: &tauri::WebviewWindow) {
+    let _ = w.show();
+    if let Ok(h) = w.hwnd() {
+        crate::winutil::bring_to_front(h.0 as isize);
+    }
+}
+
+/// Called by a page (gallery, settings) after its first paint: show the hidden window and bring it forward.
+#[tauri::command]
+pub fn window_ready(window: tauri::WebviewWindow) {
+    reveal(&window);
 }
 
 // ---------- protocol: stash://thumb/<id>, stash://full/<id> ----------
@@ -251,15 +275,7 @@ pub fn serve(app: &AppHandle, uri_path: &str, range: Option<&str>) -> Served {
     use std::io::{Read, Seek, SeekFrom};
     let mut parts = uri_path.trim_start_matches('/').splitn(2, '/');
     let (kind, id) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-    let path = if kind == "media" {
-        // library-relative media (whiteboards reference videos/images this way): no traversal, media types only
-        let ext = id.rsplit('.').next().unwrap_or("");
-        let ok_ext = matches!(mime_for_ext(ext), m if m.starts_with("video/") || m.starts_with("image/") || m.starts_with("audio/"));
-        if id.contains("..") || id.contains(':') || id.contains('\\') || !ok_ext {
-            return not_found();
-        }
-        root(app).join(id)
-    } else {
+    let path = {
         let entry = app.state::<GalleryState>().index.lock().unwrap().get(id).cloned();
         let Some(e) = entry else { return not_found() };
         if kind == "thumb" { make_thumb(&root(app), id, &e.content).unwrap_or(e.content.clone()) } else { e.content.clone() }
@@ -294,44 +310,6 @@ pub fn serve(app: &AppHandle, uri_path: &str, range: Option<&str>) -> Served {
 
 // ---------- commands ----------
 
-/// Opens a new whiteboard pre-filled with the selected items (images, videos, text).
-#[tauri::command]
-pub fn gallery_new_board(ids: Vec<String>, app: AppHandle, state: State<GalleryState>) -> Result<(), String> {
-    let root = root(&app);
-    let mut seeds = Vec::new();
-    for id in ids {
-        let Ok(e) = entry(&state, &id) else { continue };
-        let Ok(v) = library::read_json(&e.sidecar) else { continue };
-        let ext = v["file"]["ext"].as_str().unwrap_or("").to_ascii_lowercase();
-        let kind = s(&v, "type");
-        let rel = e.content.strip_prefix(&root).ok().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
-        let (w, h) = (v["image"]["w"].as_u64().unwrap_or(0), v["image"]["h"].as_u64().unwrap_or(0));
-        let seed = if kind == "image" {
-            crate::board::Seed { t: "image".into(), rel, text: String::new(), w, h }
-        } else if matches!(ext.as_str(), "mp4" | "m4v" | "webm" | "mov") {
-            crate::board::Seed { t: "video".into(), rel, text: String::new(), w, h }
-        } else if matches!(kind.as_str(), "text" | "link") || (kind == "file" && is_text_ext(&ext)) {
-            let text = read_head(&e.content, 1200).unwrap_or_default().replace("[InternetShortcut]\r\nURL=", "");
-            crate::board::Seed { t: "note".into(), rel: String::new(), text, w: 0, h: 0 }
-        } else {
-            continue;
-        };
-        seeds.push(seed);
-    }
-    if seeds.is_empty() {
-        return Err("Nothing here can go on a whiteboard (images, videos and text can)".into());
-    }
-    crate::board::open_with(&app, None, seeds);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn gallery_edit_board(id: String, app: AppHandle, state: State<GalleryState>) -> Result<(), String> {
-    let e = entry(&state, &id).map_err(|e| format!("{e:#}"))?;
-    crate::board::open(&app, Some(e.sidecar));
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn gallery_list(app: AppHandle, state: State<'_, GalleryState>) -> Result<Vec<ItemDto>, String> {
     let root = root(&app);
@@ -363,7 +341,9 @@ pub fn gallery_set_meta(id: String, caption: String, tags: Vec<String>, state: S
         library::update_sidecar(&e.sidecar, |v| {
             v["caption"] = Value::String(caption.trim().to_string());
             v["tags"] = serde_json::json!(clean);
-        })
+        })?;
+        crate::tags::bump(&clean);
+        Ok(())
     })())
 }
 

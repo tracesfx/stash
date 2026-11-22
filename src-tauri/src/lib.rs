@@ -1,4 +1,4 @@
-mod board;
+mod backdrop;
 mod clip;
 mod record;
 mod config;
@@ -12,8 +12,11 @@ mod note;
 mod ocr;
 mod palette;
 mod overlay;
-mod popup;
+mod radial;
 mod snip;
+mod tags;
+mod textedit;
+mod toast;
 mod tray;
 mod uia;
 mod wheel;
@@ -63,8 +66,8 @@ pub fn run() {
         // A second launch just exits; the running instance keeps going.
         .plugin(tauri_plugin_single_instance::init(|_app, args, _cwd| {
             tracing::info!("second instance launched; opening gallery");
-            if args.iter().any(|a| a == "--board") {
-                board::open(_app, None);
+            if cfg!(debug_assertions) && args.iter().any(|a| a == "--demo") {
+                demo(_app, &args); // testing aid: show native windows without simulated input
             } else if args.iter().any(|a| a == "--settings") {
                 settings::open(_app);
             } else {
@@ -94,10 +97,6 @@ pub fn run() {
             });
         })
         .invoke_handler(tauri::generate_handler![
-            popup::popup_data,
-            popup::popup_focus,
-            popup::set_caption,
-            popup::close_popup,
             gallery::gallery_list,
             gallery::gallery_set_meta,
             gallery::gallery_delete,
@@ -110,34 +109,24 @@ pub fn run() {
             gallery::gallery_backfill,
             gallery::gallery_export,
             gallery::gallery_open_path,
-            gallery::gallery_edit_board,
-            board::board_init,
-            board::board_save,
-            board::board_close,
-            board::board_read_image,
-            board::board_add_video,
-            gallery::gallery_new_board,
             settings::settings_get,
             settings::settings_save,
+            settings::settings_close,
+            settings::appearance_preview,
+            note::note_reset_position,
             settings::hotkey_suspend,
             theme::theme_info,
-            settings::settings_set_glass,
-            settings::settings_set_appearance,
-            settings::settings_set_wheel,
+            gallery::window_ready,
             gallery::gallery_paste,
             gallery::gallery_import_data,
-            gallery::gallery_import_text,
-            settings::settings_set_theme,
-            note::note_save,
-            note::note_close
+            gallery::gallery_import_text
         ])
         .setup(move |app| {
             use tauri::Manager;
-            app.manage(popup::PopupState::default());
-            app.manage(board::BoardState::default());
             app.manage(snip::SnipState::default());
-            app.manage(note::NoteState::default());
             app.manage(gallery::GalleryState::default());
+            app.manage(settings::PreviewBg::default());
+            tags::init(&config.library_path);
             app.manage(AppState {
                 config: RwLock::new(config),
                 paused: AtomicBool::new(false),
@@ -152,6 +141,7 @@ pub fn run() {
         .expect("error while building tauri application");
 
     // Tray-only app: keep running with zero windows. An explicit `app.exit()` still quits.
+    // (`demo` below is a debug-only testing aid.)
     app.run(|_app, event| {
         if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
             if code.is_none() {
@@ -159,4 +149,36 @@ pub fn run() {
             }
         }
     });
+}
+
+/// Debug builds: `stash.exe --demo radial|note|toast|textnote` (sent to the running instance) shows a native
+/// feedback window with sample content, so it can be screenshotted without simulating input.
+fn demo(app: &tauri::AppHandle, args: &[String]) {
+    use tauri::Manager;
+    let what = args.iter().skip_while(|a| *a != "--demo").nth(1).cloned().unwrap_or_default();
+    let root = app.state::<AppState>().cfg().library_path;
+    match what.as_str() {
+        "note" => note::open(app, winutil::SourceInfo::default()),
+        "toast" => toast::notice(app, "Capture paused"),
+        "radial" | "textnote" => {
+            // a real, fully saved sample item so tagging can be verified on disk
+            let src = winutil::SourceInfo { process: "demo.exe".into(), ..Default::default() };
+            let saved = if what == "radial" {
+                let (w, h) = (480u32, 300u32);
+                let rgba: Vec<u8> = (0..w * h).flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    [(40 + x * 180 / w) as u8, (60 + y * 120 / h) as u8, 200, 255]
+                }).collect();
+                let meta = library::ImageMeta { method: "snip", source: src, monitor: winutil::monitor_at(0, 0), rect: [0, 0, w as i32, h as i32] };
+                library::save_image(&root, &rgba, w, h, meta)
+            } else {
+                library::save_text(&root, "Demo text item for the tag radial preview", "clipboard", &src)
+            };
+            match saved {
+                Ok(s) => radial::show(app, radial::Request { sidecars: vec![s.sidecar], preview: s.preview, meta: s.meta, source_hwnd: 0, frame: None }),
+                Err(e) => tracing::error!("demo: {e:#}"),
+            }
+        }
+        _ => tracing::info!("demo: unknown {what:?}"),
+    }
 }

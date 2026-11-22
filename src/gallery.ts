@@ -8,7 +8,7 @@ interface Item {
   source_title: string; process: string; url: string | null; ext: string; name: string; bytes: number;
   mime: string; w: number | null; h: number | null; original_path: string | null;
   text: string | null; path: string; icon: string;
-  palette: string[]; board: string | null; ocr: string | null; scene: boolean;
+  palette: string[]; board: string | null; ocr: string | null;
 }
 
 const BATCH = 120;
@@ -89,6 +89,8 @@ async function load(force = false) {
   // Re-rendering on every window focus would reset scroll/selection; only do it when the library changed.
   if (!force && !changed) return;
   items = next;
+  const ids = new Set(items.map((i) => i.id));
+  for (const id of [...cardCache.keys()]) if (!ids.has(id)) cardCache.delete(id);
   selected = new Set([...selected].filter((id) => items.some((i) => i.id === id)));
   renderRail();
   filter();
@@ -106,7 +108,7 @@ function inDate(it: Item): boolean {
   return f.date === "today" ? age < day : f.date === "week" ? age < 7 * day : age < 30 * day;
 }
 
-function filter() {
+function filter(animate = false) {
   const terms = q.value.toLowerCase().split(/\s+/).filter(Boolean);
   shown = items.filter((it) => {
     if (f.type !== "all" && it.kind !== f.type) return false;
@@ -124,7 +126,60 @@ function filter() {
       return h.includes(t);
     });
   });
-  render();
+  if (animate && !opening) switchTo(); else render();
+}
+
+// ---------- motion: entrance + view switches ----------
+const reduced = () => document.documentElement.dataset.motion === "off" || matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** Staggers the cards on screen by where they are (row first, then column), not by DOM order: the masonry
+ *  fills columns top to bottom, so DOM order made the first column finish before the others started. */
+function stagger(base: number, perRow: number, perCol: number, cap: number) {
+  const cards = Array.from(grid.querySelectorAll<HTMLElement>(".card"));
+  const limit = wrap.clientHeight + 200;
+  const lefts = [...new Set(cards.map((c) => c.offsetLeft))].sort((a, b) => a - b);
+  for (const c of cards) {
+    const top = c.offsetTop - grid.offsetTop;
+    const d = top > limit ? 0 : Math.min(cap, base + (top / 100) * perRow + lefts.indexOf(c.offsetLeft) * perCol);
+    c.style.setProperty("--d", `${Math.round(d)}ms`);
+  }
+}
+
+let switchToken = 0;
+let switching = false; // cards built during a switch get the cascade, not the plain pop
+/** Images of the cards in the first screenful that have not finished decoding yet. */
+function pendingImages(): HTMLImageElement[] {
+  const limit = wrap.clientHeight + 100;
+  return Array.from(grid.querySelectorAll<HTMLImageElement>(".card img")).filter((i) => !i.classList.contains("ok") && i.closest<HTMLElement>(".card")!.offsetTop - grid.offsetTop < limit);
+}
+
+/** Switching views: the old grid dips out, the new one is built (re-using card elements whose images are
+ *  already decoded), the first screenful of new images gets a short moment to decode, then the cards cascade
+ *  in row by row with their pictures already in place, instead of empty frames that pop in later. */
+function switchTo() {
+  if (reduced()) { render(); return; }
+  const token = ++switchToken;
+  grid.classList.remove("switch");
+  grid.classList.add("out");
+  setTimeout(async () => {
+    if (token !== switchToken) return;
+    switching = true;
+    render();
+    switching = false;
+    const waiting = pendingImages();
+    if (waiting.length) {
+      await Promise.race([
+        Promise.all(waiting.map((i) => i.decode().then(() => i.classList.add("ok")).catch(() => {}))),
+        new Promise((r) => setTimeout(r, 260)),
+      ]);
+      if (token !== switchToken) return;
+    }
+    grid.classList.remove("out");
+    stagger(0, 26, 34, 360);
+    void grid.offsetWidth;
+    grid.classList.add("switch");
+    setTimeout(() => { if (token === switchToken) grid.classList.remove("switch"); }, 900);
+  }, 120);
 }
 
 // ---------- rail ----------
@@ -142,13 +197,13 @@ function top<T>(m: Map<T, number>, n: number): [T, number][] {
 function renderRail() {
   rail.replaceChildren();
   const section = (title: string, nodes: HTMLElement[]) => { if (nodes.length) rail.append(el("div", "rh", title), ...nodes); };
-  const set = (k: keyof typeof f, v: string) => () => { f[k] = f[k] === v && k !== "date" && k !== "type" ? "" : v; if (k === "date" && v === f.date) f.date = "all"; renderRail(); filter(); };
+  const set = (k: keyof typeof f, v: string) => () => { f[k] = f[k] === v && k !== "date" && k !== "type" ? "" : v; if (k === "date" && v === f.date) f.date = "all"; renderRail(); filter(true); };
 
   section("Library", [["all", "All items"], ["today", "Today"], ["week", "This week"], ["month", "This month"]].map(([v, l]) =>
-    railItem(l, v === "all" ? items.length : null, f.date === v, () => { f.date = v; renderRail(); filter(); })));
+    railItem(l, v === "all" ? items.length : null, f.date === v, () => { f.date = v; renderRail(); filter(true); })));
   const types: [string, string][] = [["all", "Everything"], ["image", "Images"], ["text", "Text"], ["link", "Links"], ["file", "Files"]];
   section("Type", types.map(([v, l]) =>
-    railItem(l, v === "all" ? null : items.filter((i) => i.kind === v).length, f.type === v, () => { f.type = v; renderRail(); filter(); })));
+    railItem(l, v === "all" ? null : items.filter((i) => i.kind === v).length, f.type === v, () => { f.type = v; renderRail(); filter(true); })));
 
   const boards = new Map<string, number>();
   for (const it of items) if (it.board) boards.set(it.board, (boards.get(it.board) ?? 0) + 1);
@@ -159,7 +214,7 @@ function renderRail() {
       const b = el("button", "sw" + (f.color === name ? " on" : ""));
       b.style.background = hex;
       b.title = name;
-      b.onclick = () => { f.color = f.color === name ? "" : name; renderRail(); filter(); };
+      b.onclick = () => { f.color = f.color === name ? "" : name; renderRail(); filter(true); };
       wrap.append(b);
     }
     rail.append(el("div", "rh", "Colour"), wrap);
@@ -172,6 +227,7 @@ function renderRail() {
   }
   section("Tags", top(tags, 12).map(([t, n]) => railItem("#" + t, n, f.tag === t, set("tag", t))));
   section("Apps", top(apps, 8).map(([a, n]) => railItem(a.replace(/\.exe$/i, ""), n, f.app === a, set("app", a))));
+  if (opening) Array.from(rail.children).forEach((c, i) => (c as HTMLElement).style.setProperty("--i", String(Math.min(i, 24))));
 }
 
 // ---------- grid ----------
@@ -185,8 +241,32 @@ function actBtn(icon: string, title: string, fn: () => void, cls = ""): HTMLButt
   return b;
 }
 
-function card(it: Item): HTMLElement {
-  const c = el("div", "card" + (selected.has(it.id) ? " sel" : ""));
+// Card elements are kept (up to ~900) and re-used when a view is shown again, so their images stay decoded:
+// rebuilding them made every view switch show empty frames that only filled in once the thumbnails reloaded.
+const cardCache = new Map<string, { el: HTMLElement; v: string }>();
+const cardVer = (it: Item) => `${it.caption}|${it.tags.join(",")}|${it.palette.length}|${it.board ?? ""}`;
+function cardFor(it: Item, eager: boolean): HTMLElement {
+  const v = cardVer(it);
+  const hit = cardCache.get(it.id);
+  if (hit && hit.v === v) {
+    const c = hit.el;
+    c.classList.toggle("sel", selected.has(it.id));
+    c.classList.remove("pop");
+    c.style.removeProperty("--d");
+    return c;
+  }
+  const c = card(it, eager);
+  cardCache.delete(it.id);
+  cardCache.set(it.id, { el: c, v });
+  if (cardCache.size > 900) {
+    const oldest = cardCache.keys().next().value;
+    if (oldest) cardCache.delete(oldest);
+  }
+  return c;
+}
+
+function card(it: Item, eager = false): HTMLElement {
+  const c = el("div", "card" + (selected.has(it.id) ? " sel" : "") + (opening || switching ? "" : " pop"));
   c.dataset.id = it.id;
   c.draggable = true;
   const chk = el("button", "chk");
@@ -201,7 +281,7 @@ function card(it: Item): HTMLElement {
   c.append(chk);
   if (isImg(it)) {
     const img = el("img");
-    img.loading = "lazy";
+    img.loading = eager ? "eager" : "lazy";
     img.draggable = false;
     if (it.w && it.h) img.style.aspectRatio = `${it.w} / ${it.h}`;
     img.onload = () => img.classList.add("ok");
@@ -231,7 +311,6 @@ function card(it: Item): HTMLElement {
   }
   if (it.caption) c.append(el("div", "cap", it.caption));
   const acts = el("div", "acts");
-  if (it.scene) acts.append(actBtn(ICON.edit, "Edit whiteboard", () => invoke("gallery_edit_board", { id: it.id })));
   if (canCopy(it)) acts.append(actBtn(ICON.copy, "Copy", () => copyItem(it)));
   if (it.url) acts.append(actBtn(ICON.open, "Open source page", () => invoke("gallery_open_url", { url: it.url })));
   acts.append(actBtn(ICON.trash, "Move to trash", () => trash([it.id]), "d"));
@@ -261,7 +340,8 @@ function render() {
 
 function more() {
   const frag = document.createDocumentFragment();
-  for (const it of shown.slice(rendered, rendered + BATCH)) frag.append(card(it));
+  const first = rendered === 0;
+  shown.slice(rendered, rendered + BATCH).forEach((it, k) => frag.append(cardFor(it, first && k < 40)));
   rendered = Math.min(shown.length, rendered + BATCH);
   grid.append(frag);
 }
@@ -286,7 +366,6 @@ function updateSelBar() {
   selbar.append(
     el("span", "n", `${selected.size} selected`),
     btn("Select all", () => { selected = new Set(shown.map((i) => i.id)); refreshSel(); }),
-    btn("New whiteboard", () => invoke("gallery_new_board", { ids: ids() }).catch((e) => flash(String(e))), "pri"),
     btn("Export…", () => exportItems(ids())),
     btn("Trash", () => trash(ids()), "danger"),
     btn("✕", () => { selected.clear(); refreshSel(); }),
@@ -426,6 +505,9 @@ function fmtBytes(n: number) { return n > 1e6 ? (n / 1e6).toFixed(1) + " MB" : M
 
 function showDetail() {
   detail.replaceChildren();
+  detail.classList.remove("fresh");
+  void detail.offsetWidth;
+  detail.classList.add("fresh");
   const sel = [...selected].map((id) => items.find((i) => i.id === id)!).filter(Boolean);
   document.body.classList.toggle("detail", sel.length > 0);
   if (!sel.length) return;
@@ -478,7 +560,7 @@ function showDetail() {
       const b = el("button", "dot");
       b.style.background = col;
       b.title = `${col} — click to filter by this colour`;
-      b.onclick = () => { f.color = bucketOf(col); renderRail(); filter(); };
+      b.onclick = () => { f.color = bucketOf(col); renderRail(); filter(true); };
       pal.append(b);
     }
     detail.append(el("label", "l", "Palette"), pal);
@@ -614,7 +696,7 @@ async function trash(ids: string[]) {
 }
 
 // ---------- events ----------
-q.addEventListener("input", filter);
+q.addEventListener("input", () => filter()); // typing stays instant (no switch animation)
 
 window.addEventListener("keydown", (e) => {
   const inField = (e.target as HTMLElement).tagName === "INPUT";
@@ -678,5 +760,26 @@ window.addEventListener("keydown", async (e) => {
 });
 
 window.addEventListener("focus", () => load()); // pick up captures made while the window was in the background
-load(true);
-q.focus();
+// Opening: the window is created hidden and the page stays invisible (body.pre) while the first render lays
+// out; the cards then get their stagger from their real positions, the window is shown, and the entrance
+// (body.opening) plays once.
+let opening = true;
+document.body.classList.add("pre");
+// A hidden page gets no animation frames, so the window is revealed right after layout (not from a frame
+// callback); the entrance starts on the first frame after it is visible.
+load(true)
+  .catch((e) => console.error(e))
+  .finally(() => {
+    stagger(120, 55, 45, 600); // reads layout synchronously
+    invoke("window_ready").catch(() => {});
+    q.focus();
+    requestAnimationFrame(() => {
+      document.body.classList.remove("pre");
+      document.body.classList.add("opening");
+      setTimeout(() => {
+        opening = false;
+        document.body.classList.remove("opening");
+        document.querySelectorAll<HTMLElement>("#rail > *").forEach((e) => e.style.removeProperty("--i"));
+      }, 1500);
+    });
+  });
