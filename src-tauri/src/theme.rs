@@ -27,6 +27,8 @@ pub struct Style {
     pub wheel_gap: f32,
     pub wheel_opacity: f32,
     pub animations: bool,
+    /// Cursor glow strength 0..1 (0 = off).
+    pub glow: f32,
 }
 
 /// Neutral, cool glass sheen (the reference picks are mostly colourless; colour comes from what is behind).
@@ -87,6 +89,7 @@ pub fn style_for(cfg: &Config) -> Style {
         wheel_gap: a.wheel_gap as f32,
         wheel_opacity: a.wheel_opacity as f32 / 100.0,
         animations: a.animations,
+        glow: a.cursor_glow as f32 / 100.0,
     }
 }
 
@@ -143,6 +146,15 @@ pub fn style_window(win: &WebviewWindow, cfg: &Config) {
     restyle_window(win, cfg);
     if let Ok(h) = win.hwnd() {
         let hwnd = h.0 as isize;
+        // Windows' open/close animation draws the window from a snapshot without the live backdrop, so the
+        // blur only appeared once it finished; the page plays its own entrance animation instead.
+        if !(cfg!(debug_assertions) && std::env::var_os("STASH_DWM_TRANSITIONS").is_some()) {
+            use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
+            let on: windows::core::BOOL = true.into();
+            unsafe {
+                let _ = DwmSetWindowAttribute(windows::Win32::Foundation::HWND(hwnd as *mut _), DWMWA_TRANSITIONS_FORCEDISABLED, &on as *const _ as *const _, 4);
+            }
+        }
         // window events arrive on the main thread, where the composition objects live
         win.on_window_event(move |ev| {
             if matches!(ev, tauri::WindowEvent::Destroyed) {

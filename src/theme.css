@@ -149,3 +149,12 @@ kbd {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
 }
+
+/* cursor glow (Appearance > Cursor glow): a soft light of the glass colours under the pointer (theme.ts moves it) */
+#cursor-glow {
+  position: fixed; left: -260px; top: -260px; width: 520px; height: 520px; border-radius: 50%; pointer-events: none; z-index: 60;
+  background: radial-gradient(circle, color-mix(in srgb, var(--glass-a) calc(42% * var(--glow, 0)), transparent),
+    color-mix(in srgb, var(--glass-b) calc(18% * var(--glow, 0)), transparent) 38%, transparent 68%);
+  mix-blend-mode: plus-lighter; opacity: 0; transition: opacity 220ms var(--ease); will-change: transform;
+}
+#cursor-glow.on { opacity: 1; }

@@ -120,6 +120,8 @@ struct State {
     dib_dc: HDC,
     dib_bits: *mut u8,
     origin: POINT, // window top-left
+    /// Cursor in window pixels, for the cursor glow.
+    glow_pt: (f32, f32),
 }
 
 unsafe fn state<'a>(hwnd: HWND) -> Option<&'a mut State> {
@@ -194,6 +196,7 @@ pub fn run(cursor: POINT, scale: f32, release: Arc<AtomicBool>, style: Style, fr
             dib_dc,
             dib_bits: bits as *mut u8,
             origin,
+            glow_pt: (-1000.0, -1000.0),
         });
 
         let hinst = GetModuleHandleW(None).ok()?;
@@ -261,6 +264,15 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let dt = st.last.elapsed().as_secs_f32() * 1000.0;
                     st.last = Instant::now();
                     let mut animating = hover_changed || st.t0.elapsed().as_secs_f32() * 1000.0 < OPEN_MS + 16.0;
+                    if st.style.glow > 0.0 {
+                        let mut p = POINT::default();
+                        let _ = GetCursorPos(&mut p);
+                        let g = ((p.x - st.origin.x) as f32, (p.y - st.origin.y) as f32);
+                        if g != st.glow_pt {
+                            st.glow_pt = g;
+                            animating = true;
+                        }
+                    }
                     for i in 0..st.acts.len() {
                         let target = if st.hover == Some(i) { 1.0 } else { 0.0 };
                         let d = target - st.hprog[i];
@@ -411,6 +423,7 @@ fn render(st: &State) -> Pixmap {
     if let Some(body) = pb.finish() {
         pm.fill_path(&body, &Paint { blend_mode: BlendMode::Clear, ..Default::default() }, FillRule::Winding, Transform::identity(), None);
         gfx::glass_fill(&mut pm, &body, bounds, st.bg.as_ref(), &st.style, 1.0);
+        gfx::cursor_glow(&mut pm, &body, st.glow_pt.0, st.glow_pt.1, r_out * 0.85, &st.style);
     }
 
     let acc = st.style.hover;

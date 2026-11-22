@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
 
-interface Info { accent: string; glass: string[]; hover: string; appearance: { win_translucency: number; win_blur: number; win_saturation: number; glass_tint: number; ui_font: number; ui_radius: number; animations: boolean }; }
+interface Info { accent: string; glass: string[]; hover: string; appearance: { win_translucency: number; win_blur: number; win_saturation: number; glass_tint: number; ui_font: number; ui_radius: number; animations: boolean; cursor_glow: number }; }
 
 function luma(h: string) { const [r, g, b] = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); return r * 0.299 + g * 0.587 + b * 0.114; }
 
@@ -37,8 +37,28 @@ function apply(info: Info) {
   set("--g-wash", (ap.glass_tint / 100).toFixed(2));
   root.dataset.clear = clear ? "1" : "0";
   root.dataset.motion = ap.animations ? "on" : "off";
+  set("--glow", ((ap.cursor_glow ?? 0) / 100).toFixed(2));
+  glowOn = (ap.cursor_glow ?? 0) > 0;
+  if (!glowOn) glow.classList.remove("on");
   (["a", "b", "c"] as const).forEach((k, i) => info.glass[i] && set(`--glass-${k}`, info.glass[i]));
 }
+
+// Cursor glow: one fixed element moved with a transform (compositor only, no style recalculation per move).
+const glow = document.createElement("div");
+glow.id = "cursor-glow";
+let glowOn = false, gx = 0, gy = 0, glowRaf = 0;
+addEventListener("pointermove", (e) => {
+  if (!glowOn) return;
+  gx = e.clientX; gy = e.clientY;
+  if (!glow.isConnected && document.body) document.body.append(glow);
+  if (!glowRaf) glowRaf = requestAnimationFrame(() => {
+    glowRaf = 0;
+    glow.style.transform = `translate(${gx}px, ${gy}px)`;
+    glow.classList.add("on");
+  });
+}, { passive: true });
+document.documentElement.addEventListener("pointerleave", () => glow.classList.remove("on"));
+addEventListener("blur", () => glow.classList.remove("on"));
 
 async function refresh() {
   try {

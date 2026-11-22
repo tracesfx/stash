@@ -140,6 +140,7 @@ fn put(root: &Path, it: Item, write: impl FnOnce(&Path) -> Result<()>) -> Result
     }
     let sidecar = dir.join(format!("{id}.json"));
     write_atomic(&sidecar, serde_json::to_string_pretty(&v)?.as_bytes())?;
+    notify_changed();
     Ok(sidecar)
 }
 
@@ -265,6 +266,21 @@ fn thumb_and_palette(rgb: &[u8], w: u32, h: u32) -> Result<(std::sync::Arc<Thumb
 
 static SIDECAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Called when items are added, tagged or captioned outside the gallery (lib.rs emits `library-changed`, so an
+/// open gallery slides new captures in instead of reloading on focus). Background palette/OCR updates do not
+/// notify: the gallery gets those from its own backfill.
+static NOTIFIER: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
+
+pub fn set_notifier(f: impl Fn() + Send + Sync + 'static) {
+    let _ = NOTIFIER.set(Box::new(f));
+}
+
+pub fn notify_changed() {
+    if let Some(f) = NOTIFIER.get() {
+        f();
+    }
+}
+
 /// Read-modify-write a sidecar under a global lock (captions, tags, OCR and palette updates can race).
 /// Unknown fields are preserved;  is refreshed.
 pub fn update_sidecar(sidecar: &Path, f: impl FnOnce(&mut Value)) -> Result<()> {
@@ -277,7 +293,9 @@ pub fn update_sidecar(sidecar: &Path, f: impl FnOnce(&mut Value)) -> Result<()> 
 
 /// Sets the caption in an existing sidecar, preserving all other (even unknown) fields.
 pub fn set_caption(sidecar: &Path, caption: &str) -> Result<()> {
-    update_sidecar(sidecar, |v| v["caption"] = Value::String(caption.to_string()))
+    update_sidecar(sidecar, |v| v["caption"] = Value::String(caption.to_string()))?;
+    notify_changed();
+    Ok(())
 }
 
 /// Adds tags (case-insensitive de-dupe, existing order kept) to a sidecar.
@@ -290,5 +308,7 @@ pub fn add_tags(sidecar: &Path, tags: &[String]) -> Result<()> {
             }
         }
         v["tags"] = json!(cur);
-    })
+    })?;
+    notify_changed();
+    Ok(())
 }

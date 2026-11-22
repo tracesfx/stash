@@ -90,8 +90,11 @@ struct St {
     restore_focus: bool,
     /// Last painted caret phase; the timer repaints only when it (or the open animation) changes.
     phase: u128,
-    /// Being dragged: drawn without the (now stale) frosted backdrop until it is dropped.
+    /// Being dragged. The backdrop is re-grabbed at the new position as it moves (throttled to ~1 per frame);
+    /// without capture exclusion it would capture itself, so it is then drawn without one until dropped.
     moving: bool,
+    bg_dirty: bool,
+    last_grab: Instant,
     /// The window is excluded from screen capture, so the backdrop can be re-grabbed after a move.
     excluded: bool,
 }
@@ -109,7 +112,7 @@ fn run(app: AppHandle, source: SourceInfo, style: Style, corner: &str) {
         // keep the note out of screen captures: its backdrop can then be re-grabbed after a drag (and it never
         // shows up in the user's own snips)
         let excluded = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_ok();
-        let mut st = Box::new(St { app, win, s, style, field: TextField::new(4000), bg, source, t_open: Instant::now(), blink: Instant::now(), done: false, restore_focus: true, phase: u128::MAX, moving: false, excluded });
+        let mut st = Box::new(St { app, win, s, style, field: TextField::new(4000), bg, source, t_open: Instant::now(), blink: Instant::now(), done: false, restore_focus: true, phase: u128::MAX, moving: false, bg_dirty: false, last_grab: Instant::now(), excluded });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *st as *mut St as isize);
         OPEN.store(hwnd.0 as isize, Ordering::SeqCst);
         paint(&mut st);
@@ -138,6 +141,12 @@ fn backdrop(origin: POINT, w: i32, h: i32, style: &Style) -> Option<Pixmap> {
     crate::winutil::grab_rect(RECT { left: origin.x, top: origin.y, right: origin.x + w, bottom: origin.y + h }, false)
         .ok()
         .and_then(|f| gfx::blur_backdrop(&f, origin, w, h, style.blur, style.saturation))
+}
+
+fn regrab(st: &mut St) {
+    st.bg = backdrop(st.win.origin, st.win.w, st.win.h, &st.style);
+    st.bg_dirty = false;
+    st.last_grab = Instant::now();
 }
 
 /// Enter: hide at once, then write the item (a few ms) and confirm with a toast.
@@ -179,6 +188,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         };
         match msg {
             WM_TIMER => {
+                if st.moving && st.bg_dirty {
+                    regrab(st);
+                    paint(st);
+                    return LRESULT(0);
+                }
                 let phase = (st.blink.elapsed().as_millis() / 530) % 2;
                 if phase != st.phase || st.t_open.elapsed().as_secs_f32() * 1000.0 < OPEN_MS + 20.0 {
                     paint(st);
@@ -228,12 +242,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             WM_MOVE => {
                 st.win.origin = POINT { x: (lparam.0 & 0xFFFF) as i16 as i32, y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32 };
+                if st.moving && st.excluded {
+                    st.bg_dirty = true;
+                    if st.last_grab.elapsed().as_millis() >= 14 {
+                        regrab(st);
+                        paint(st);
+                    }
+                }
                 LRESULT(0)
             }
             WM_EXITSIZEMOVE => {
                 st.moving = false;
                 if st.excluded {
-                    st.bg = backdrop(st.win.origin, st.win.w, st.win.h, &st.style);
+                    regrab(st);
                 } else {
                     st.bg = None; // would capture ourselves; plain tint instead
                 }
@@ -265,7 +286,7 @@ fn paint(st: &mut St) {
     let (w, h) = (st.win.w as u32, st.win.h as u32);
     st.phase = (st.blink.elapsed().as_millis() / 530) % 2;
     let caret = st.phase == 0 && unsafe { GetForegroundWindow() == st.win.hwnd };
-    let bg = if st.moving { None } else { st.bg.as_ref() };
+    let bg = if st.moving && !st.excluded { None } else { st.bg.as_ref() };
     let Some(pm) = render(&mut st.field, &st.style, st.s, w, h, bg, caret) else { return };
     // open animation: fade + rise
     let s = st.s;

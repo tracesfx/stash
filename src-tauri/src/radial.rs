@@ -588,6 +588,7 @@ fn render(st: &mut St) -> Pixmap {
     if let Some(body) = pb.finish() {
         pm.fill_path(&body, &Paint { blend_mode: BlendMode::Clear, ..Default::default() }, FillRule::Winding, Transform::identity(), None);
         gfx::glass_fill(&mut pm, &body, bounds, st.bg.as_ref(), &st.style, 1.0);
+        gfx::cursor_glow(&mut pm, &body, st.last_cursor.0, st.last_cursor.1, R_OUT * s * 0.85, &st.style);
     }
 
     // wedges: hover / match / applied states, labels
@@ -827,7 +828,7 @@ mod tests {
             seq: 0,
             t_open: Instant::now(),
             last: Instant::now(),
-            last_cursor: (0.0, 0.0),
+            last_cursor: (w as f32 * 0.66, ring_h * 0.3), // where the cursor glow shows in the previews
             last_move: Instant::now(),
             off_since: None,
             closing: None,

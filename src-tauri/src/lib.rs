@@ -105,7 +105,9 @@ pub fn run() {
             gallery::gallery_open_url,
             gallery::gallery_copy,
             gallery::gallery_import,
-            gallery::gallery_set_board,
+            gallery::gallery_tag,
+            gallery::gallery_view_load,
+            gallery::gallery_view_save,
             gallery::gallery_backfill,
             gallery::gallery_export,
             gallery::gallery_open_path,
@@ -135,6 +137,21 @@ pub fn run() {
             let hotkey_ok = hotkeys::register(app.handle());
             settings::apply_autostart_on_start(app.handle());
             tray::build(app.handle(), hotkey_ok)?;
+            // coalesce bursts (a capture + its tags) into one event for the gallery
+            let h = app.handle().clone();
+            let pending = std::sync::Arc::new(AtomicBool::new(false));
+            library::set_notifier(move || {
+                if pending.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                let (h, p) = (h.clone(), pending.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    p.store(false, std::sync::atomic::Ordering::SeqCst);
+                    use tauri::Emitter;
+                    let _ = h.emit_to("gallery", "library-changed", ());
+                });
+            });
             Ok(())
         })
         .build(tauri::generate_context!())

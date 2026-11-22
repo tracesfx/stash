@@ -209,6 +209,32 @@ pub fn glass_fill(pm: &mut Pixmap, path: &Path, bounds: Rect, bg: Option<&Pixmap
     }
 }
 
+/// Cursor glow (Appearance > Cursor glow): a soft light in the glass colours at (x, y), clipped to `path`.
+pub fn cursor_glow(pm: &mut Pixmap, path: &Path, x: f32, y: f32, radius: f32, style: &Style) {
+    let k = style.glow.clamp(0.0, 1.0);
+    if k <= 0.0 {
+        return;
+    }
+    let (w, h) = (pm.width(), pm.height());
+    let Some(mut mask) = Mask::new(w, h) else { return };
+    mask.fill_path(path, FillRule::Winding, true, Transform::identity());
+    let (a, b) = (style.glass[0], style.glass[1]);
+    let stops = vec![
+        GradientStop::new(0.0, Color::from_rgba8(a[0], a[1], a[2], (190.0 * k) as u8)),
+        GradientStop::new(0.4, Color::from_rgba8(b[0], b[1], b[2], (70.0 * k) as u8)),
+        GradientStop::new(1.0, Color::from_rgba8(b[0], b[1], b[2], 0)),
+    ];
+    let Some(sh) = RadialGradient::new(Point::from_xy(x, y), 0.0, Point::from_xy(x, y), radius, stops, SpreadMode::Pad, Transform::identity()) else {
+        return;
+    };
+    let mut p = Paint::default();
+    p.shader = sh;
+    p.anti_alias = true;
+    p.blend_mode = BlendMode::Plus;
+    let full = PathBuilder::from_rect(Rect::from_xywh(0.0, 0.0, w as f32, h as f32).unwrap());
+    pm.fill_path(&full, &p, FillRule::Winding, Transform::identity(), Some(&mask));
+}
+
 /// 1 px rim: bright at the top-left, faint at the bottom-right (the "edge light" of the references).
 pub fn glass_rim(pm: &mut Pixmap, path: &Path, bounds: Rect, width: f32, strength: f32) {
     let s = strength.clamp(0.0, 1.0);

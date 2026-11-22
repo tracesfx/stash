@@ -10,12 +10,12 @@ interface Appearance {
   glass_translucency: number; glass_blur: number; glass_saturation: number; glass_tint: number; hover_color: string;
   win_translucency: number; win_blur: number; win_saturation: number;
   wheel_size: number; wheel_hole: number; wheel_gap: number; wheel_opacity: number; ui_font: number; ui_radius: number;
-  popup_corner: string; animations: boolean;
+  popup_corner: string; animations: boolean; cursor_glow: number;
 }
 interface Config {
   library_path: string; hotkey: string; hold_ms: number; capture_url: boolean; tag_menu: boolean;
   autostart: boolean; glass: string[]; ocr: boolean; appearance: Appearance; rec_system_audio: boolean; rec_mic: boolean;
-  rec_fps: number; rec_max_secs: number; wheel_actions: string[]; style_rev: number;
+  rec_fps: number; rec_max_secs: number; wheel_actions: string[]; style_rev: number; settings_autoclose: boolean;
 }
 interface Dto { config: Config; autostart_supported: boolean; }
 
@@ -232,6 +232,7 @@ function buildTabs() {
     b.onclick = () => select(id);
     tabBtns[id] = b;
     nav.append(b);
+    tabsRO.observe(b);
     const p = el("section", "pane");
     panes[id] = p;
     $("panes").append(p);
@@ -362,6 +363,7 @@ function buildGeneral() {
       row("Search text inside images", "Reads text in screenshots with the OCR built into Windows, on this PC only.", toggle(draft.ocr, (v) => (draft.ocr = v))),
       row("Record page URL from browsers", "Reads the address bar through Windows UI Automation. Chromium browsers may load pages slightly slower.", toggle(draft.capture_url, (v) => (draft.capture_url = v)))),
     ...group("System",
+      row("Close settings when clicking elsewhere", "Changes are saved as you make them, so nothing is lost.", toggle(draft.settings_autoclose, (v) => (draft.settings_autoclose = v))),
       row("Start with Windows", autostartSupported ? "Runs quietly in the tray at sign-in." : "Only applies to the installed (release) build.", toggle(draft.autostart, (v) => (draft.autostart = v), !autostartSupported))),
   );
 }
@@ -380,6 +382,7 @@ const NATIVE_LOOK: ADef[] = [
   ["glass_translucency", "Translucency", "How thin the dark tint is.", 0, 100, 1, "%"],
   ["glass_saturation", "Saturation", "Colour boost of the blurred background.", 100, 250, 5, "%"],
 ];
+const GLOW: ADef = ["cursor_glow", "Cursor glow", "A soft light in the glass colours that follows the pointer. 0 = off.", 0, 100, 1, "%"];
 const SHEEN: ADef = ["glass_tint", "Colour sheen", "How strongly the glass colours tint every glass surface.", 0, 100, 1, "%"];
 const WHEEL_LOOK: ADef[] = [
   ["wheel_size", "Size", "", 60, 160, 5, "%"],
@@ -391,42 +394,13 @@ const UI_LOOK: ADef[] = [
   ["ui_font", "Text size", "", 11, 18, 1, "px"],
   ["ui_radius", "Corner roundness", "", 0, 20, 1, "px"],
 ];
-const glassLook = (blur: number, tr: number, sat: number) =>
-  ({ win_blur: blur, win_translucency: tr, win_saturation: sat, glass_blur: blur, glass_translucency: tr, glass_saturation: sat });
-const PRESETS: [string, Partial<Appearance>][] = [
-  ["Default", { ...glassLook(30, 70, 150), glass_tint: 20, wheel_size: 100, wheel_hole: 40, wheel_gap: 5, wheel_opacity: 100, ui_font: 13, ui_radius: 12 }],
-  ["Veil", { ...glassLook(6, 92, 140), glass_tint: 15 }],
-  ["Crystal", { ...glassLook(40, 88, 180), glass_tint: 10 }],
-  ["Frosted", { ...glassLook(50, 25, 130), glass_tint: 25 }],
-  ["Clear", { ...glassLook(0, 85, 100), glass_tint: 10 }],
-  ["Compact", { wheel_size: 80, wheel_hole: 30, ui_font: 12, ui_radius: 8 }],
-  ["Big & soft", { wheel_size: 130, wheel_gap: 8, ui_font: 15, ui_radius: 18 }],
-];
-const GLASS: [string, string[]][] = [
-  ["Cool", ["#8fa6ff", "#b59cff", "#7fd6e6"]],
-  ["Aurora", ["#5a78ff", "#be5aff", "#3cdcc8"]],
-  ["Sunset", ["#ff7a59", "#ff3d81", "#ffc65a"]],
-  ["Ocean", ["#2d9cff", "#1fd1c1", "#5a5cff"]],
-  ["Rose", ["#ff8fb1", "#c27bff", "#ffd0a8"]],
-  ["Mono", ["#9aa4b8", "#6b7388", "#c9d1e3"]],
-];
-
 function buildAppearance() {
-  const sliders: Record<string, Slider> = {};
   const mk = (d: ADef) => {
     const [k, label, hint, min, max, step, unit] = d;
-    const r = sliderRow(label, hint, { min, max, step, value: Number(draft.appearance[k]), fmt: (v) => `${v} ${unit}`, onInput: (v) => { draft.appearance[k] = v; } });
-    sliders[k] = r.s;
+    const r = sliderRow(label, hint, { min, max, step, value: Number(draft.appearance[k] ?? 0), fmt: (v) => `${v} ${unit}`, onInput: (v) => { draft.appearance[k] = v; } });
     return r.row;
   };
-  const presets = el("div", "presets");
-  for (const [name, p] of PRESETS) {
-    const b = el("button", "chip", name);
-    b.onclick = () => { Object.assign(draft.appearance, p); for (const k in p) sliders[k]?.set(Number(draft.appearance[k])); commit(true); };
-    presets.append(b);
-  }
-
-  // glass colours: three round swatches + a gradient preview + presets
+  // glass colours: three round swatches + a gradient preview
   const sws = el("div", "swatches ctl");
   const inputs: HTMLInputElement[] = [];
   const gprev = el("div", "gprev");
@@ -445,13 +419,6 @@ function buildAppearance() {
     sws.append(w);
   }
   sws.append(gprev);
-  const gpre = el("div", "presets");
-  for (const [name, cols] of GLASS) {
-    const b = el("button", "chip", name);
-    b.style.backgroundImage = `linear-gradient(90deg, ${cols.map((c) => c + "40").join(", ")})`;
-    b.onclick = () => { draft.glass = [...cols]; paintGlass(); commit(true); };
-    gpre.append(b);
-  }
   paintGlass();
 
   // hover colour
@@ -480,10 +447,9 @@ function buildAppearance() {
   const pv = el("div", "pv");
   pv.append(previewImg);
   panes.appearance.append(
-    ...group("Presets", presets),
     ...group("Everywhere",
-      row("Glass colours", "The sheen on panels, the wheel and the tag menu.", sws, { stack: true }), gpre,
-      mk(SHEEN),
+      row("Glass colours", "The sheen on panels, the wheel and the tag menu.", sws, { stack: true }),
+      mk(SHEEN), mk(GLOW),
       row("Hover and selection colour", "Wheel highlight, selected items and switches.", hov),
       row("Animations", "Turn off for instant, motion-free UI.", toggle(draft.appearance.animations, (v) => (draft.appearance.animations = v)))),
     ...group("Gallery and settings windows", ...WIN_LOOK.map(mk), ...UI_LOOK.map(mk)),
@@ -547,9 +513,11 @@ function modalUntilFocus() { modal = true; }
 window.addEventListener("focus", () => (modal = false));
 window.addEventListener("blur", () => {
   if (recording) { stopRecording(); return; }
-  setTimeout(() => { if (!document.hasFocus() && !modal && opened) closeWindow(); }, 120);
+  setTimeout(() => { if (!document.hasFocus() && !modal && opened && draft?.settings_autoclose !== false) closeWindow(); }, 120);
 });
 window.addEventListener("resize", moveIndicator);
+// the Text size knob resizes the tabs without a window resize: keep the indicator under the selected tab
+const tabsRO = new ResizeObserver(() => moveIndicator());
 
 // ---------- Appearance preview (the native glass, rendered by Rust over a desktop snapshot) ----------
 const previewImg = el("img");

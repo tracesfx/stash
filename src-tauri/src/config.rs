@@ -33,6 +33,8 @@ pub struct Config {
     pub rec_max_secs: u32,
     /// Wheel wedges that are shown (ids from `wheel::Action::id`). The wheel lays them out in a fixed order.
     pub wheel_actions: Vec<String>,
+    /// Close the settings window when it loses focus (changes are saved as they are made).
+    pub settings_autoclose: bool,
     /// Look revision. Missing in configs written before M6 (reads as 0), which then get the new glass defaults.
     #[serde(default)]
     pub style_rev: u32,
@@ -76,6 +78,8 @@ pub struct Appearance {
     pub popup_corner: String,
     /// UI animations on/off.
     pub animations: bool,
+    /// Soft glow of the glass colours that follows the cursor, 0 (off)..100.
+    pub cursor_glow: u8,
     /// Legacy (style_rev < 3) Transparent switch; read once by `Config::migrate`, never written.
     #[serde(skip_serializing)]
     pub glass_clear: bool,
@@ -100,6 +104,7 @@ impl Default for Appearance {
             ui_radius: 12,
             popup_corner: "br".into(),
             animations: true,
+            cursor_glow: 35,
             glass_clear: false,
         }
     }
@@ -120,6 +125,7 @@ impl Appearance {
         self.wheel_opacity = self.wheel_opacity.clamp(30, 100);
         self.ui_font = self.ui_font.clamp(11, 18);
         self.ui_radius = self.ui_radius.min(20);
+        self.cursor_glow = self.cursor_glow.min(100);
         if !matches!(self.popup_corner.as_str(), "br" | "bl" | "tr" | "tl") {
             self.popup_corner = "br".into();
         }
@@ -146,6 +152,7 @@ impl Default for Config {
             rec_fps: 30,
             rec_max_secs: 300,
             wheel_actions: crate::wheel::default_ids(),
+            settings_autoclose: true,
             glass: crate::theme::DEFAULT_GLASS.iter().map(|s| s.to_string()).collect(),
             style_rev: STYLE_REV,
         }

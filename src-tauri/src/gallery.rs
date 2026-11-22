@@ -72,6 +72,28 @@ fn s(v: &Value, k: &str) -> String {
 }
 
 /// Walks `<root>/YYYY-MM/*.json`. Skips dot-folders (.trash, .thumbs).
+/// Tags of a sidecar, with the legacy `board` value folded in as one more tag (M7: boards became tag collections).
+fn tags_of(v: &Value) -> Vec<String> {
+    let mut t: Vec<String> = v["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default();
+    if let Some(b) = v["board"].as_str().map(str::trim).filter(|b| !b.is_empty()) {
+        if !t.iter().any(|x| x.eq_ignore_ascii_case(b)) {
+            t.push(b.to_string());
+        }
+    }
+    t
+}
+
+fn clean_tags(tags: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut clean: Vec<String> = Vec::new();
+    for t in tags {
+        let t = t.trim().trim_start_matches('#').trim().to_string();
+        if !t.is_empty() && !clean.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
+            clean.push(t);
+        }
+    }
+    clean
+}
+
 fn scan(root: &Path, ocr_on: bool) -> (Vec<ItemDto>, HashMap<String, Entry>) {
     let mut items = Vec::new();
     let mut map = HashMap::new();
@@ -115,7 +137,7 @@ fn scan(root: &Path, ocr_on: bool) -> (Vec<ItemDto>, HashMap<String, Entry>) {
                 created: s(&v, "created"),
                 method: s(&v, "method"),
                 caption: s(&v, "caption"),
-                tags: v["tags"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
+                tags: tags_of(&v),
                 source_title: v["source"]["title"].as_str().unwrap_or("").to_string(),
                 process: v["source"]["process"].as_str().unwrap_or("").to_string(),
                 url: v["source"]["url"].as_str().map(String::from),
@@ -331,16 +353,13 @@ fn err<T>(r: Result<T>) -> Result<T, String> {
 pub fn gallery_set_meta(id: String, caption: String, tags: Vec<String>, state: State<GalleryState>) -> Result<(), String> {
     err((|| {
         let e = entry(&state, &id)?;
-        let mut clean: Vec<String> = Vec::new();
-        for t in tags {
-            let t = t.trim().trim_start_matches('#').to_string();
-            if !t.is_empty() && !clean.iter().any(|x| x.eq_ignore_ascii_case(&t)) {
-                clean.push(t);
-            }
-        }
+        let clean = clean_tags(tags);
         library::update_sidecar(&e.sidecar, |v| {
             v["caption"] = Value::String(caption.trim().to_string());
             v["tags"] = serde_json::json!(clean);
+            if let Some(m) = v.as_object_mut() {
+                m.remove("board"); // folded into the tags the gallery showed (see tags_of)
+            }
         })?;
         crate::tags::bump(&clean);
         Ok(())
@@ -583,26 +602,58 @@ pub async fn gallery_backfill(limit: usize, app: AppHandle, state: State<'_, Gal
     Ok(Backfill { done, remaining: idx.values().filter(|e| e.needs).count() })
 }
 
-// ---------- boards ----------
+// ---------- tag collections ----------
 
-/// Puts items on a board (a named collection); an empty name removes them from their board.
+/// Adds and/or removes tags on many items (the selection bar's "Tag…"). Legacy `board` values count as tags.
 #[tauri::command]
-pub fn gallery_set_board(ids: Vec<String>, board: String, state: State<GalleryState>) -> Result<(), String> {
+pub fn gallery_tag(ids: Vec<String>, add: Vec<String>, remove: Vec<String>, state: State<GalleryState>) -> Result<(), String> {
     err((|| {
-        let board = board.trim().to_string();
+        let add = clean_tags(add);
+        let remove = clean_tags(remove);
         for id in ids {
             let e = entry(&state, &id)?;
             library::update_sidecar(&e.sidecar, |v| {
-                if board.is_empty() {
-                    if let Value::Object(m) = v {
-                        m.remove("board");
-                    }
-                } else {
-                    v["board"] = Value::String(board.clone());
+                let mut t = tags_of(v);
+                t.retain(|x| !remove.iter().any(|r| r.eq_ignore_ascii_case(x)));
+                t.extend(add.iter().cloned());
+                v["tags"] = serde_json::json!(clean_tags(t));
+                if let Some(m) = v.as_object_mut() {
+                    m.remove("board");
                 }
             })?;
         }
+        crate::tags::bump(&add);
         Ok(())
+    })())
+}
+
+// ---------- canvas views: <root>/.views/<scope>.json ----------
+
+fn view_path(root: &Path, scope: &str) -> Result<PathBuf> {
+    let safe: String = scope.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(120).collect();
+    if safe.is_empty() {
+        return Err(anyhow!("empty view scope"));
+    }
+    Ok(root.join(".views").join(format!("{safe}.json")))
+}
+
+/// Saved canvas layout for a scope (item positions, pan and zoom), or null.
+#[tauri::command]
+pub fn gallery_view_load(scope: String, app: AppHandle) -> Result<Value, String> {
+    err((|| {
+        let p = view_path(&root(&app), &scope)?;
+        Ok(library::read_json(&p).unwrap_or(Value::Null))
+    })())
+}
+
+#[tauri::command]
+pub fn gallery_view_save(scope: String, data: Value, app: AppHandle) -> Result<(), String> {
+    err((|| {
+        let p = view_path(&root(&app), &scope)?;
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        library::write_atomic(&p, serde_json::to_string(&data)?.as_bytes())
     })())
 }
 
