@@ -4,18 +4,20 @@
 import "./theme";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { statsRoot, loadStats } from "./stats-view";
 
 interface Appearance {
   [k: string]: number | string | boolean;
   glass_translucency: number; glass_blur: number; glass_saturation: number; glass_tint: number; hover_color: string;
   win_translucency: number; win_blur: number; win_saturation: number;
   wheel_size: number; wheel_hole: number; wheel_gap: number; wheel_opacity: number; ui_font: number; ui_radius: number;
-  popup_corner: string; animations: boolean; cursor_glow: number; cursor_glow_on: boolean; cursor_glow_lag: number; menu_anim: string; menu_anim_ms: number;
+  popup_corner: string; animations: boolean; cursor_glow: number; cursor_glow_on: boolean; cursor_glow_lag: number; menu_anim: string; menu_anim_ms: number; anim_fps: number;
 }
 interface Config {
   library_path: string; hotkey: string; hold_ms: number; capture_url: boolean; tag_menu: boolean;
   autostart: boolean; glass: string[]; ocr: boolean; appearance: Appearance; rec_system_audio: boolean; rec_mic: boolean;
   rec_fps: number; rec_max_secs: number; wheel_actions: string[]; style_rev: number; settings_autoclose: boolean; trash_days: number;
+  show_imported: boolean; keep_gallery_ready: boolean;
 }
 interface Dto { config: Config; autostart_supported: boolean; }
 
@@ -193,7 +195,9 @@ const ms = (v: number) => `${v} ms`;
 const clipLen = (v: number) => (v === 0 ? "No limit" : v < 60 ? `${v} s` : `${Math.round(v / 60)} min`);
 
 // ---------- tabs ----------
-const TABS: [string, string][] = [["capture", "Capture"], ["wheel", "Wheel"], ["recording", "Recording"], ["general", "General"], ["appearance", "Appearance"]];
+const TABS: [string, string][] = [["capture", "Capture"], ["wheel", "Wheel"], ["recording", "Recording"], ["general", "General"], ["appearance", "Appearance"], ["stats", "Statistics"]];
+/** Tabs shown only with Advanced on. */
+const ADV_TABS = ["appearance", "stats"];
 const panes: Record<string, HTMLElement> = {};
 const tabBtns: Record<string, HTMLButtonElement> = {};
 const ind = el("span", "ind");
@@ -201,11 +205,11 @@ let current = "capture";
 
 /** Advanced on: every setting plus the Appearance tab. Off: only the basic settings. */
 function showAdvanced(on: boolean) {
-  tabBtns.appearance.style.display = on ? "" : "none";
+  for (const t of ADV_TABS) tabBtns[t].style.display = on ? "" : "none";
   document.body.classList.toggle("basic", !on);
   $("appBtn").classList.toggle("on", on);
   try { localStorage.setItem("stash.settings.advanced", on ? "1" : "0"); } catch { /* storage unavailable */ }
-  if (!on && current === "appearance") select("capture");
+  if (!on && ADV_TABS.includes(current)) select("capture");
   else moveIndicator();
 }
 
@@ -226,6 +230,7 @@ function select(id: string) {
   moveIndicator();
   $("panes").scrollTop = 0;
   if (id === "appearance") { refreshPreview(); setTimeout(() => animIntro(), 260); }
+  if (id === "stats") loadStats();
 }
 
 function buildTabs() {
@@ -368,12 +373,19 @@ function buildGeneral() {
     ...group("Library",
       row("Library folder", "A OneDrive or Dropbox folder keeps it synced. Only new captures go to a new folder; move old files yourself.", f, { stack: true }),
       trashRow,
+      row("Show imported items in All", "Folder imports are tagged with the folder name and stay under Imported in the gallery sidebar. Turn on to mix them into All.", toggle(draft.show_imported ?? false, (v) => (draft.show_imported = v))),
       adv(row("Search text inside images", "Reads text in screenshots with the OCR built into Windows, on this PC only.", toggle(draft.ocr, (v) => (draft.ocr = v)))),
       adv(row("Record page URL from browsers", "Reads the address bar through Windows UI Automation. Chromium browsers may load pages slightly slower.", toggle(draft.capture_url, (v) => (draft.capture_url = v))))),
     ...group("System",
+      adv(row("Keep gallery ready", "Opens the gallery instantly by keeping it loaded in the background (about 35 MB while hidden).", toggle(draft.keep_gallery_ready ?? true, (v) => (draft.keep_gallery_ready = v)))),
       adv(row("Close settings when clicking elsewhere", "Changes are saved as you make them, so nothing is lost.", toggle(draft.settings_autoclose, (v) => (draft.settings_autoclose = v)))),
       row("Start with Windows", autostartSupported ? "Runs quietly in the tray at sign-in." : "Only applies to the installed (release) build.", toggle(draft.autostart, (v) => (draft.autostart = v), !autostartSupported))),
   );
+}
+
+// ---------- statistics (advanced; computed when the tab opens) ----------
+function buildStats() {
+  panes.stats.append(statsRoot());
 }
 
 // ---------- appearance ----------
@@ -533,11 +545,13 @@ function animRows(): HTMLElement[] {
   const len = sliderRow("Duration", "How long the wheel and tag menu take to open. Short feels snappy; long shows off the motion.",
     { min: 100, max: 600, step: 10, value: dur(), fmt: ms, onInput: (v) => { ap.menu_anim_ms = v; clearTimeout(replay); replay = window.setTimeout(() => minis[cur()].play(), 160); } });
   const pick = row("Opening animation", "How the wheel and the tag menu appear. Hover a tile to preview it (needs Animations).", tiles, { stack: true });
-  const sync = () => { const off = !ap.animations; tiles.classList.toggle("off", off); len.s.disable(off); pick.classList.toggle("dis", off); };
+  const fps = sliderRow("Frame rate", "Caps how often animations draw. Auto follows your display; lower saves power on fast monitors.",
+    { min: 0, max: 240, stops: [15, 24, 30, 45, 60, 90, 120, 144, 165, 240, 0], value: Number(ap.anim_fps) || 0, fmt: (v) => (v === 0 ? "Auto" : `${v} fps`), onInput: (v) => (ap.anim_fps = v) });
+  const sync = () => { const off = !ap.animations; tiles.classList.toggle("off", off); len.s.disable(off); fps.s.disable(off); pick.classList.toggle("dis", off); };
   sync();
   animSync = sync;
   animIntro = () => minis[cur()].play();
-  return [pick, len.row];
+  return [pick, len.row, fps.row];
 }
 
 function buildAppearance() {
@@ -610,7 +624,7 @@ function buildAppearance() {
       mk(SHEEN), ...glowRows(),
       row("Hover and selection colour", "Wheel highlight, selected items and switches.", hov),
       row("Animations", "Turn off for instant, motion-free UI.", toggle(draft.appearance.animations, (v) => { draft.appearance.animations = v; animSync(); }))),
-    ...group("Menu animation", ...animRows()),
+    ...group("Motion", ...animRows()),
     ...group("Gallery and settings windows", ...WIN_LOOK.map(mk), ...UI_LOOK.map(mk)),
     ...group("Wheel, tag menu and note", pv, ...NATIVE_LOOK.map(mk)),
     ...group("Wheel shape", ...WHEEL_LOOK.map(mk)),
@@ -710,6 +724,7 @@ async function init() {
   buildRecording();
   buildGeneral();
   buildAppearance();
+  buildStats();
   let showAdv = false;
   try { showAdv = (localStorage.getItem("stash.settings.advanced") ?? localStorage.getItem("stash.settings.appearance")) === "1"; } catch { /* storage unavailable */ }
   showAdvanced(showAdv);

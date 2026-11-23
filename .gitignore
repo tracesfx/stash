@@ -25,3 +25,7 @@ dist-ssr
 
 # Design reference images (third-party, not for commit)
 reference/
+
+# Local work folders (promo footage, perf test tooling): large media and browser profiles, not for commit
+footage/
+perf-tools/

@@ -96,6 +96,49 @@
       .sw input { position: absolute; inset: -8px; width: 60px; height: 60px; border: 0; padding: 0; cursor: pointer; background: none; }
       .gprev { flex: 1; min-width: 60px; height: 34px; border-radius: 999px; box-shadow: var(--rim); }
 
+      /* statistics (src/stats-view.ts): single-hue charts in the accent; text stays in the text colours */
+      .stats { display: flex; flex-direction: column; gap: 14px; user-select: text; }
+      .shead { display: flex; align-items: center; gap: 14px; justify-content: space-between; }
+      .stiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr)); gap: 10px; }
+      .stile { padding: 14px 16px; border-radius: var(--r-l); background: var(--glass-card), var(--surface); box-shadow: var(--rim); }
+      .stile .sv { font: 600 1.6rem/1.1 var(--font-display); font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .stile .sl { margin-top: 4px; font-weight: 600; color: var(--dim); }
+      .stile .ss { margin-top: 2px; font-size: 0.846rem; color: var(--faint); }
+      .scard { padding: 14px 18px 16px; border-radius: var(--r-xl); background: var(--glass-card), var(--surface); box-shadow: var(--rim); min-width: 0; }
+      .scard h3 { margin: 0 0 12px; font: 600 1rem var(--font-display); }
+      .scard > .hint { margin-top: 10px; }
+      .stwo { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 14px; }
+      .hbars { display: flex; flex-direction: column; gap: 7px; }
+      .hb { display: grid; grid-template-columns: minmax(4.5rem, 38%) 1fr auto; align-items: center; gap: 10px; font-size: 0.923rem; }
+      .hb .hl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
+      .hb .tr { height: 10px; }
+      .hb .tr i { display: block; height: 100%; border-radius: 0 4px 4px 0; background: var(--accent); }
+      .hb .hv { min-width: 2.5rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--txt); }
+      .hb:hover .hl { color: var(--txt); }
+      .hb:hover .tr i { filter: brightness(1.2); }
+      .vbars { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px; height: 120px; }
+      .vb { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+      .vb .col { flex: 1; display: flex; align-items: flex-end; border-bottom: 1px solid var(--line); }
+      .vb .col i { display: block; width: 100%; border-radius: 4px 4px 0 0; background: var(--accent); }
+      .vb .col i.z { height: 0 !important; }
+      .vb:hover .col i { filter: brightness(1.2); }
+      .vb span { height: 1.1em; font-size: 0.769rem; color: var(--faint); white-space: nowrap; overflow: visible; }
+      .cal { overflow-x: auto; overflow-y: hidden; padding-bottom: 2px; }
+      .calm, .calg { display: grid; grid-template-columns: repeat(53, minmax(0, 1fr)); gap: 3px; min-width: 36rem; }
+      .calm span { font-size: 0.769rem; color: var(--faint); white-space: nowrap; overflow: visible; height: 1.3em; }
+      .calw { display: grid; grid-template-rows: repeat(7, 1fr); gap: 3px; }
+      .calw i, .call i { display: block; aspect-ratio: 1; border-radius: 3px; background: rgba(255, 255, 255, .06); }
+      .calw i.fut { background: none; }
+      .calw i:hover:not(.fut) { box-shadow: 0 0 0 1.5px var(--txt); }
+      .l1 { background: color-mix(in srgb, var(--accent) 30%, rgba(255, 255, 255, .06)) !important; }
+      .l2 { background: color-mix(in srgb, var(--accent) 55%, rgba(255, 255, 255, .06)) !important; }
+      .l3 { background: color-mix(in srgb, var(--accent) 78%, rgba(255, 255, 255, .06)) !important; }
+      .l4 { background: var(--accent) !important; }
+      .call { display: flex; align-items: center; justify-content: flex-end; gap: 4px; margin-top: 8px; font-size: 0.769rem; color: var(--faint); }
+      .call i { width: 11px; }
+      .call span { margin: 0 4px; }
+      .facts { display: grid; grid-template-columns: auto 1fr; gap: 6px 18px; font-size: 0.923rem; color: var(--faint); }
+      .facts b { color: var(--txt); font-weight: 500; font-variant-numeric: tabular-nums; }
       footer { display: flex; align-items: center; gap: 10px; padding: 14px 28px 18px; border-top: 1px solid var(--line); background: rgba(0, 0, 0, .12); }
       footer .grow { flex: 1; min-width: 0; }
       /* changes save themselves: a quiet "Saved" tick confirms each one */

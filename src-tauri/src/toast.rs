@@ -57,6 +57,8 @@ struct St {
     seq: u64,
     anim: bool,
     done: bool,
+    /// The fully shown frame is on screen already.
+    still: bool,
 }
 
 /// Window size (physical px) for a toast at DPI scale `s`.
@@ -139,17 +141,17 @@ fn show_window(pm: Pixmap, t: &Toast, style: &Style, origin: POINT, w: i32, h: i
     unsafe {
         let ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
         let Some(win) = Layered::new(w!("StashToast"), w!("Stash"), Some(wnd_proc), ex, origin, w, h) else { return };
-        let mut st = Box::new(St { win, scene: pm, t0: Instant::now(), ms: t.ms as f32, seq, anim: style.animations, done: false });
+        let mut st = Box::new(St { win, scene: pm, t0: Instant::now(), ms: t.ms as f32, seq, anim: style.animations, done: false, still: false });
         SetWindowLongPtrW(st.win.hwnd, GWLP_USERDATA, &mut *st as *mut St as isize);
         frame(&mut st);
         let _ = ShowWindow(st.win.hwnd, SW_SHOWNOACTIVATE);
-        SetTimer(Some(st.win.hwnd), TIMER, 15, None);
+        let pacer = crate::gfx::FramePacer::start(st.win.hwnd, TIMER);
         let mut msg = MSG::default();
         while !st.done && GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        let _ = KillTimer(Some(st.win.hwnd), TIMER);
+        drop(pacer);
         SetWindowLongPtrW(st.win.hwnd, GWLP_USERDATA, 0);
     }
 }
@@ -175,6 +177,12 @@ fn frame(st: &mut St) {
         st.done = true;
         return;
     }
+    // while it just sits there the frame never changes: present it once
+    let still = op == 1.0 && rise == 0.0;
+    if still && st.still {
+        return;
+    }
+    st.still = still;
     let (w, h) = (st.scene.width() as f32, st.scene.height() as f32);
     let mut out = gfx::compose(&st.scene, op, 0.97 + 0.03 * op, w / 2.0, h / 2.0);
     if rise != 0.0 {

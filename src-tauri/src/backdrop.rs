@@ -224,6 +224,41 @@ pub fn apply(hwnd: isize, p: Params) -> Result<()> {
     Ok(())
 }
 
+/// Fades the backdrop in from clear over `ms` (each time a kept window is shown, so the glass appears with the
+/// page's entrance instead of in one frame). Main thread only; no-op without our backdrop.
+pub fn fade_in(hwnd: isize, ms: u32) -> Result<()> {
+    WINDOWS.with(|w| {
+        let w = w.borrow();
+        let Some(a) = w.get(&hwnd) else { return Ok(()) };
+        let target = layer_opacity(a.params.blur);
+        with_compositor(|c| {
+            if ms == 0 || target <= 0.0 {
+                return a.sprite.SetOpacity(target);
+            }
+            let anim = c.CreateScalarKeyFrameAnimation()?;
+            let ease = c.CreateCubicBezierEasingFunction(
+                windows_numerics::Vector2 { X: 0.2, Y: 0.0 },
+                windows_numerics::Vector2 { X: 0.0, Y: 1.0 },
+            )?;
+            anim.InsertKeyFrame(0.0, 0.0)?;
+            anim.InsertKeyFrameWithEasingFunction(1.0, target, &ease)?;
+            anim.SetDuration(windows::Foundation::TimeSpan { Duration: ms as i64 * 10_000 })?;
+            a.sprite.StartAnimation(&HSTRING::from("Opacity"), &anim)
+        })
+    })
+}
+
+/// Makes the backdrop clear (after the window hid), so the next show starts from nothing rather than flashing
+/// the full glass for a frame before `fade_in` takes over. Main thread only.
+pub fn clear(hwnd: isize) {
+    WINDOWS.with(|w| {
+        if let Some(a) = w.borrow().get(&hwnd) {
+            let _ = a.sprite.StopAnimation(&HSTRING::from("Opacity"));
+            let _ = a.sprite.SetOpacity(0.0);
+        }
+    });
+}
+
 pub fn attached(hwnd: isize) -> bool {
     WINDOWS.with(|w| w.borrow().contains_key(&hwnd))
 }

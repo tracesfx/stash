@@ -53,6 +53,8 @@ fn method_label(m: &str) -> &str {
         "drop" => "Dropped",
         "record" => "Clip",
         "board" => "Board",
+        "import" => "Imported",
+        "upload" => "Added",
         o => o,
     }
 }
@@ -255,6 +257,36 @@ pub fn save_file(root: &Path, src: &Path, method: &str, source: &SourceInfo) -> 
     Ok(Saved { sidecar, preview: Preview::Text(name), meta })
 }
 
+/// Extensions a folder import picks up (pictures, video, audio, PDF and text-like files); everything else in the
+/// folder (system files, archives, project files) is skipped.
+pub fn importable(ext: &str) -> bool {
+    let e = ext.to_ascii_lowercase();
+    matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "mp4" | "m4v" | "webm" | "mov" | "mp3" | "wav" | "ogg" | "oga" | "m4a" | "flac" | "pdf")
+        || crate::gallery::is_text_ext(&e)
+}
+
+/// Copies a file into the library as part of a folder import: method `import`, the folder name(s) as tags and an
+/// `import` section recording where it came from. Imported items stay out of the gallery's All view by default.
+pub fn import_file(root: &Path, src: &Path, tags: &[String], folder: &str) -> Result<Saved> {
+    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("bin").to_string();
+    let kind = if matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") { "image" } else { "file" };
+    let name = src.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let sidecar = put(
+        root,
+        Item {
+            kind,
+            ext: &ext,
+            mime: mime_for(&ext),
+            method: "import",
+            source: &SourceInfo::default(),
+            original_path: Some(src.to_string_lossy().into_owned()),
+            extra: json!({ "original_name": name, "tags": tags, "import": { "folder": folder } }),
+        },
+        |p| std::fs::copy(src, p).map(|_| ()).map_err(Into::into),
+    )?;
+    Ok(Saved { sidecar, preview: Preview::Text(name.clone()), meta: format!("Imported · {name}") })
+}
+
 /// Feedback thumbnail and the dominant-colour palette, from one downscale.
 fn thumb_and_palette(rgb: &[u8], w: u32, h: u32) -> Result<(std::sync::Arc<Thumb>, Vec<String>)> {
     let img = image::RgbImage::from_raw(w, h, rgb.to_vec()).context("thumb buffer")?;
@@ -275,7 +307,34 @@ pub fn set_notifier(f: impl Fn() + Send + Sync + 'static) {
     let _ = NOTIFIER.set(Box::new(f));
 }
 
+/// While > 0, `notify_changed` is a no-op (a folder import adds hundreds of items: the gallery reloads once at the end).
+static QUIET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Runs `f` without per-item change notifications, then notifies once.
+pub fn quietly<T>(f: impl FnOnce() -> T) -> T {
+    let r = quietly_no_notify(f);
+    notify_changed();
+    r
+}
+
+/// Runs `f` without change notifications (the caller notifies when its whole batch is done).
+pub fn quietly_no_notify<T>(f: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::Ordering;
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            QUIET.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    QUIET.fetch_add(1, Ordering::SeqCst);
+    let _done = Done; // also on panic
+    f()
+}
+
 pub fn notify_changed() {
+    if QUIET.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        return;
+    }
     if let Some(f) = NOTIFIER.get() {
         f();
     }
@@ -335,6 +394,18 @@ pub fn set_favorite(sidecar: &Path, on: bool) -> Result<()> {
     })?;
     notify_changed();
     Ok(())
+}
+
+/// Hides or shows an item (sidecar `hidden: true`; absent when shown). Hidden items only appear in the gallery's
+/// Hidden view.
+pub fn set_hidden(sidecar: &Path, on: bool) -> Result<()> {
+    update_sidecar(sidecar, |v| {
+        if on {
+            v["hidden"] = Value::Bool(true);
+        } else if let Some(m) = v.as_object_mut() {
+            m.remove("hidden");
+        }
+    })
 }
 
 /// Cancels a fresh capture (the tag radial's Discard): deletes its content file, sidecar and gallery thumbnail

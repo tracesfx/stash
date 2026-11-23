@@ -4,6 +4,7 @@ mod record;
 mod config;
 mod gfx;
 mod settings;
+mod stats;
 mod theme;
 mod gallery;
 mod hotkeys;
@@ -11,6 +12,7 @@ mod library;
 mod note;
 mod ocr;
 mod palette;
+mod poster;
 mod overlay;
 mod radial;
 mod snip;
@@ -127,9 +129,20 @@ pub fn run() {
             settings::hotkey_suspend,
             theme::theme_info,
             gallery::window_ready,
+            gallery::perf_log,
+            gallery::perf_enabled,
+            gallery::gallery_hide_ready,
+            gallery::gallery_warm_ready,
+            gallery::gallery_warm_paint,
             gallery::gallery_paste,
             gallery::gallery_import_data,
-            gallery::gallery_import_text
+            gallery::gallery_import_text,
+            gallery::gallery_import_folder,
+            gallery::gallery_hide,
+            gallery::gallery_changed,
+            gallery::gallery_hidden_tags,
+            gallery::gallery_set_hidden_tags,
+            stats::library_stats
         ])
         .setup(move |app| {
             use tauri::Manager;
@@ -137,6 +150,7 @@ pub fn run() {
             app.manage(gallery::GalleryState::default());
             app.manage(settings::PreviewBg::default());
             tags::init(&config.library_path);
+            gfx::set_fps_cap(config.appearance.anim_fps);
             app.manage(AppState {
                 config: RwLock::new(config),
                 paused: AtomicBool::new(false),
@@ -152,6 +166,16 @@ pub fn run() {
                     (c.library_path.clone(), c.trash_days)
                 };
                 std::thread::spawn(move || gallery::purge_expired(&root, days));
+            }
+            // load the gallery hidden once startup has settled, so opening it never waits for WebView2
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    // parse the UI fonts now, not on the first wheel / tag menu
+                    let _ = (gfx::font(), gfx::font_regular());
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    gallery::prewarm(&h);
+                });
             }
             // coalesce bursts (a capture + its tags) into one event for the gallery
             let h = app.handle().clone();

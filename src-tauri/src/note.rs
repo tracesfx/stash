@@ -119,12 +119,18 @@ fn run(app: AppHandle, source: SourceInfo, style: Style, corner: &str) {
         let _ = ShowWindow(hwnd, SW_SHOW);
         crate::winutil::bring_to_front(hwnd.0 as isize);
         tracing::info!("note visible {} ms after open", t0.elapsed().as_millis());
-        SetTimer(Some(hwnd), TIMER, 15, None);
+        // display-paced while it opens, then a slow timer is enough for the caret blink
+        let mut pacer = Some(crate::gfx::FramePacer::start(hwnd, TIMER));
         let mut msg = MSG::default();
         while !st.done && GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            if pacer.is_some() && st.t_open.elapsed().as_secs_f32() * 1000.0 > OPEN_MS + 100.0 {
+                pacer = None;
+                SetTimer(Some(hwnd), TIMER, 15, None);
+            }
         }
+        drop(pacer);
         let _ = KillTimer(Some(hwnd), TIMER);
         OPEN.store(0, Ordering::SeqCst);
         let restore = st.restore_focus && GetForegroundWindow() == hwnd;

@@ -237,6 +237,7 @@ fn restyle_window(win: &WebviewWindow, cfg: &Config) {
 /// Re-style open windows and tell every web view to refresh its look.
 pub fn apply(app: &AppHandle) {
     let cfg = app.state::<AppState>().cfg();
+    crate::gfx::set_fps_cap(cfg.appearance.anim_fps);
     for label in ["gallery", "settings"] {
         if let Some(w) = app.get_webview_window(label) {
             restyle_window(&w, &cfg);

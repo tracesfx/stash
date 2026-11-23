@@ -628,6 +628,119 @@ pub mod preview {
         }
         if let Some(v) = std::env::var("STASH_PREVIEW_BLUR").ok().and_then(|v| v.parse().ok()) { c.appearance.glass_blur = v; }
         if let Some(v) = std::env::var("STASH_PREVIEW_SAT").ok().and_then(|v| v.parse().ok()) { c.appearance.glass_saturation = v; }
+        // STASH_PREVIEW_GLASS=#a,#b,#c and STASH_PREVIEW_HOVER=#hex: glass colours / highlight
+        if let Ok(v) = std::env::var("STASH_PREVIEW_GLASS") { c.glass = v.split(',').map(|s| s.trim().to_string()).collect(); }
+        if let Ok(v) = std::env::var("STASH_PREVIEW_HOVER") { c.appearance.hover_color = v; }
         crate::theme::style_for(&c)
+    }
+}
+
+// ---------- frame pacing ----------
+/// Animation frame-rate cap (Settings > Appearance > Animation frame rate); 0 = the display's refresh rate.
+static FPS_CAP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_fps_cap(fps: u16) {
+    FPS_CAP.store(fps as u32, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Ticks a native window's animation in step with the display instead of `SetTimer`, whose ~15.6 ms
+/// granularity gave ~64 fps with uneven spacing on any monitor. A thread sleeps (high-resolution waitable timer)
+/// until just after each vblank (DWM composition timing), then *sends* the window `WM_TIMER(id)`, so ticks
+/// never queue up behind a slow frame. With a frame-rate cap it skips vblanks. It never waits on DWM itself, so
+/// an idle compositor cannot stall a menu. Stops when dropped or when the window is gone.
+pub struct FramePacer {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FramePacer {
+    pub fn start(hwnd: HWND, id: usize) -> FramePacer {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let s = stop.clone();
+        let h = hwnd.0 as isize;
+        std::thread::spawn(move || unsafe {
+            use windows::Win32::Graphics::Dwm::{DwmGetCompositionTimingInfo, DWM_TIMING_INFO};
+            use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+            use windows::Win32::System::Threading::*;
+            let hwnd = HWND(h as *mut _);
+            let mut freq = 0i64;
+            let _ = QueryPerformanceFrequency(&mut freq);
+            let freq = freq.max(1);
+            let now = || {
+                let mut c = 0i64;
+                let _ = QueryPerformanceCounter(&mut c);
+                c
+            };
+            let timer = CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0).ok();
+            let wait_until = |t: i64| {
+                let left = t - now();
+                if left <= 0 {
+                    return;
+                }
+                let hundred_ns = left * 10_000_000 / freq;
+                match timer {
+                    Some(tm) => {
+                        let due = -hundred_ns; // relative
+                        if SetWaitableTimer(tm, &due, 0, None, None, false).is_ok() {
+                            WaitForSingleObject(tm, 100);
+                        } else {
+                            std::thread::sleep(std::time::Duration::from_nanos(hundred_ns as u64 * 100));
+                        }
+                    }
+                    None => std::thread::sleep(std::time::Duration::from_nanos(hundred_ns as u64 * 100)),
+                }
+            };
+            let mut last = 0i64;
+            // STASH_PERF=1: tick spacing goes to the log when the pacer stops
+            let perf = std::env::var_os("STASH_PERF").is_some();
+            let (t_start, mut ticks, mut worst, mut period_seen) = (now(), 0u32, 0i64, freq / 60);
+            while !s.load(Ordering::Relaxed) && IsWindow(Some(hwnd)).as_bool() {
+                // the current vblank phase and refresh period (fallback: 60 Hz, free-running)
+                let mut ti = DWM_TIMING_INFO { cbSize: std::mem::size_of::<DWM_TIMING_INFO>() as u32, ..Default::default() };
+                let (period, vblank) = if DwmGetCompositionTimingInfo(HWND::default(), &mut ti).is_ok() && ti.qpcRefreshPeriod > 0 {
+                    (ti.qpcRefreshPeriod as i64, ti.qpcVBlank as i64)
+                } else {
+                    (freq / 60, now())
+                };
+                period_seen = period;
+                let cap = FPS_CAP.load(Ordering::Relaxed) as i64;
+                let gap = if cap > 0 { freq / cap } else { 0 };
+                let t = now();
+                // first vblank ahead of us that keeps the cap (half a period of slack so 60 on 60 Hz never skips)
+                let mut next = vblank + ((t - vblank).div_euclid(period) + 1) * period;
+                while next - last < gap - period / 2 {
+                    next += period;
+                }
+                // tick just after the vblank: the frame is then ready well before DWM composes the next one
+                wait_until(next + freq / 2000);
+                if s.load(Ordering::Relaxed) {
+                    break;
+                }
+                if perf && last > 0 {
+                    worst = worst.max(now() - last);
+                }
+                ticks += 1;
+                last = next;
+                let _ = SendMessageTimeoutW(hwnd, WM_TIMER, WPARAM(id), LPARAM(0), SMTO_ABORTIFHUNG | SMTO_NORMAL, 250, None);
+                // a sent message is handled inside GetMessage without returning: wake the loop so it sees `done`
+                let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+            }
+            if let Some(tm) = timer {
+                let _ = CloseHandle(tm);
+            }
+            if perf && ticks > 1 {
+                let ms = (now() - t_start) as f64 * 1000.0 / freq as f64;
+                let cap = FPS_CAP.load(Ordering::Relaxed);
+                tracing::info!("perf pacer: {ticks} ticks in {ms:.0} ms = {:.1} fps (cap {cap}, refresh {:.0} Hz), worst gap {:.1} ms",
+                    ticks as f64 * 1000.0 / ms, freq as f64 / period_seen as f64, worst as f64 * 1000.0 / freq as f64);
+            }
+        });
+        FramePacer { stop }
+    }
+}
+
+impl Drop for FramePacer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }

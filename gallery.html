@@ -9,7 +9,7 @@
       /* top bar */
       header { grid-column: 1 / -1; display: flex; gap: 10px; align-items: center; padding: 10px 16px; min-width: 0; }
       .brand { display: flex; align-items: center; gap: 8px; width: 15.4rem; flex: none; font: 600 1.154rem var(--font-display); letter-spacing: .01em; }
-      .brand svg { width: 22px; height: 22px; }
+      .brand img { width: 26px; height: 26px; margin: -2px 0; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, .35)); }
       .search { position: relative; flex: 1; min-width: 140px; max-width: 460px; }
       .search svg { position: absolute; left: 12px; top: 50%; width: 15px; height: 15px; transform: translateY(-50%); stroke: var(--faint); fill: none; stroke-width: 1.6; stroke-linecap: round; pointer-events: none; }
       #q { padding-left: 34px; border-radius: 999px; height: 36px; }
@@ -107,9 +107,13 @@
       .card.leaving { pointer-events: none; z-index: 0; }
       .card:hover { box-shadow: var(--shadow), 0 0 0 2px color-mix(in srgb, var(--hover) 55%, transparent); z-index: 2; }
       .card.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), var(--shadow); z-index: 2; }
-      .card img { display: block; width: 100%; height: auto; opacity: 0; transition: opacity 240ms var(--ease); background: linear-gradient(100deg, var(--surface) 30%, var(--surface-2) 50%, var(--surface) 70%) 0 0 / 200% 100%; animation: shimmer 1.2s linear infinite; }
-      .card img.ok { opacity: 1; animation: none; }
-      @keyframes shimmer { to { background-position: -200% 0; } }
+      .card img { position: relative; z-index: 1; display: block; width: 100%; height: auto; opacity: 0; transition: opacity 240ms var(--ease); background: var(--surface); }
+      .card img.ok { opacity: 1; }
+      /* loading sweep: a transform-only animation (runs on the compositor), only on cards whose picture is loading */
+      .card.ld::before { content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none; background: linear-gradient(100deg, transparent 30%, var(--surface-2) 50%, transparent 70%); transform: translateX(-100%); animation: shimmer 1.2s linear infinite; }
+      @keyframes shimmer { to { transform: translateX(100%); } }
+      .card .vplay { position: absolute; left: 0; top: 0; z-index: 2; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 160ms var(--ease); pointer-events: none; background: transparent !important; }
+      .card .vplay.on { opacity: 1; }
       .card .t { padding: 12px; max-height: 160px; overflow: hidden; word-break: break-word; white-space: pre-wrap; }
       .card .t.link { color: var(--accent); font-size: 0.923rem; }
       .card .f { padding: 16px 12px; display: flex; gap: 8px; align-items: center; }
@@ -128,6 +132,10 @@
       .card.note .tm { margin-left: auto; flex: none; }
       .acts { position: absolute; top: 8px; right: 8px; display: flex; gap: 4px; opacity: 0; transform: translateY(-3px); transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease); z-index: 3; }
       .card:hover .acts { opacity: 1; transform: none; }
+      /* the buttons blur what is under them only while they can be seen: a backdrop-filter costs a layer and a
+         render pass per button even at opacity 0, which made every scroll frame re-layerize ~5 layers per card */
+      .card .ab { backdrop-filter: none; }
+      .card:hover .ab { backdrop-filter: blur(10px); }
       .ab { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 8px; color: #fff; background: rgba(20,20,26,.72); backdrop-filter: blur(10px); cursor: pointer; }
       .ab:hover { background: rgba(20,20,26,.92); }
       .ab.d:hover { background: #c4283d; }
@@ -225,6 +233,8 @@
       .card:hover .fb { opacity: 1; transform: none; }
       .card .fb:hover { background: rgba(20, 20, 26, .9); }
       .card .fb svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; }
+      .card .fb { backdrop-filter: none; }
+      .card:hover .fb, .card.fav .fb { backdrop-filter: blur(8px); }
       .card.fav .fb { opacity: 1; transform: none; color: #ffce54; background: rgba(20, 20, 26, .4); }
       .card.fav .fb svg { fill: currentColor; filter: drop-shadow(0 0 4px rgba(255, 190, 70, .55)); }
       .card .fb.pop { animation: fav-pop 460ms var(--spring); }
@@ -315,6 +325,52 @@
       details.ocr summary { cursor: pointer; color: var(--faint); }
       details.ocr div { margin-top: 6px; padding: 8px 10px; background: var(--surface); border-radius: var(--r-s); max-height: 160px; overflow: auto; white-space: pre-wrap; user-select: text; }
       #viewer .vi { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px; background: rgba(30,30,38,.8); color: #ddd; font-size: 0.923rem; }
+      /* sidebar: places (Canvases, Hidden), built-in tags, colour dots */
+      .ri.place { justify-content: flex-start; }
+      .ri.place .n { margin-left: auto; }
+      .ri .pi { display: grid; place-items: center; width: 16px; height: 16px; flex: none; color: var(--faint); }
+      .ri .pi svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+      .ri.on .pi { color: var(--accent); }
+      .ri[data-key] { justify-content: flex-start; }
+      .ri[data-key] > span:not(.tstar):not(.n) { flex: 1; min-width: 0; }
+      .ri[data-key] .n { margin-left: auto; }
+      .ri.ft .n { margin-left: auto; }
+      i.sw { width: 10px; height: 10px; flex: none; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .3); }
+      .chip i.sw { margin-right: 6px; }
+      /* hidden view bar: hidden tags with an unhide eye */
+      #tbar { flex-wrap: wrap; }
+      #tbar .htag { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 12px; background: var(--surface-2); color: var(--txt); }
+      #tbar .htag b { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; color: var(--dim); }
+      #tbar .htag b svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+      #tbar .htag:hover b { background: rgba(255, 255, 255, .16); color: var(--txt); }
+      /* note rows: hover buttons sit left of the star */
+      .card.note .acts { top: 10px; right: 44px; }
+      /* detail: built-in tags (read-only pills) */
+      #detail .sys { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+      #detail .sys .st { padding: 2px 9px; border: 0; border-radius: 999px; background: rgba(255, 255, 255, .07); box-shadow: inset 0 0 0 1px var(--line); color: var(--dim); font-size: 0.846rem; cursor: pointer; }
+      #detail .sys button.st:hover { color: var(--txt); background: color-mix(in srgb, var(--hover) 25%, transparent); }
+      #detail .sys .st.hid { cursor: default; color: var(--faint); }
+      body.detail #detail .sys .st { pointer-events: auto; }
+      /* right-click menu */
+      #ctx { position: fixed; z-index: 50; min-width: 230px; max-width: 320px; padding: 5px; border-radius: var(--r-l); background: rgba(30, 31, 38, .97); box-shadow: var(--rim), var(--shadow); backdrop-filter: blur(16px); opacity: 0; transform: scale(.96); pointer-events: none; visibility: hidden; transition: opacity 120ms var(--ease), transform 160ms var(--ease), visibility 0s linear 160ms; }
+      #ctx.on { opacity: 1; transform: none; pointer-events: auto; visibility: visible; transition: opacity 120ms var(--ease), transform 160ms var(--ease), visibility 0s; }
+      #ctx button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; border: 0; border-radius: var(--r-s); background: none; color: var(--txt); text-align: left; cursor: pointer; font-size: 0.962rem; }
+      #ctx button:hover:not(:disabled) { background: color-mix(in srgb, var(--hover) 30%, transparent); }
+      #ctx button.d:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 45%, transparent); }
+      #ctx button:disabled { color: var(--faint); cursor: default; }
+      #ctx .mi { display: grid; place-items: center; width: 16px; height: 16px; flex: none; color: var(--dim); }
+      #ctx .mi svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+      #ctx .ml { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #ctx kbd { font-size: 0.769rem; color: var(--faint); background: none; box-shadow: none; padding: 0; }
+      #ctx hr { margin: 4px 6px; border: 0; border-top: 1px solid var(--line); }
+      #ctx .mh { padding: 6px 10px 4px; font-size: 0.846rem; font-weight: 600; color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      /* viewer: zooming pictures */
+      #viewer img.zm { cursor: zoom-in; will-change: transform; }
+      #viewer img.zm.zoomed { cursor: grab; border-radius: 0; }
+      #viewer img.zm.pan { cursor: grabbing; }
+      #viewer .vz { position: absolute; top: 18px; right: 22px; padding: 5px 12px; border-radius: 999px; background: rgba(30, 30, 38, .85); color: #eee; font-size: 0.923rem; font-variant-numeric: tabular-nums; pointer-events: none; opacity: 0; transition: opacity 160ms var(--ease); }
+      #viewer .vz.on { opacity: 1; }
+      #viewer .vz::after { content: " · scroll to zoom, drag to move, 0 to fit"; color: #aaa; }
       /* toast + drop */
       #toast { backdrop-filter: var(--blur); position: fixed; bottom: 22px; left: 50%; transform: translate(-50%, 12px); background: var(--surface-solid); border: 1px solid var(--line); box-shadow: var(--shadow); padding: 10px 16px; border-radius: 999px; display: flex; gap: 14px; align-items: center; opacity: 0; pointer-events: none; transition: opacity 180ms var(--ease), transform 180ms var(--ease); z-index: 30; }
       #toast.on { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
@@ -329,7 +385,9 @@
       body.opening header { animation: g-down 420ms var(--ease) 40ms both; }
       body.opening #rail > * { animation: g-left 380ms var(--ease) both; animation-delay: calc(90ms + var(--i, 0) * 16ms); }
       body.opening #main { animation: g-rise 520ms var(--ease) 50ms both; }
-      @keyframes g-win { from { opacity: 0; transform: scale(.975); } }
+      /* #app only scales: an opacity animation would make it a backdrop root, so #main's glass blur could not see
+         the body's colour wash until the animation ended and the blur would visibly change then. Its children fade. */
+      @keyframes g-win { from { transform: scale(.975); } }
       @keyframes g-down { from { opacity: 0; transform: translateY(-12px); } }
       @keyframes g-left { from { opacity: 0; transform: translateX(-14px); } }
       @keyframes g-rise { from { opacity: 0; transform: translateY(18px); } }
@@ -343,7 +401,8 @@
     <div id="app">
       <header>
         <div class="brand">
-          <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9V5h4M15 5h4v4M19 15v4h-4M9 19H5v-4"/><circle cx="12" cy="12" r="1.6" fill="var(--accent)" stroke="none"/></svg>
+          <!-- the app icon itself (src-tauri/icons, copied by scripts/make-icons.mjs), so header, taskbar and tray match -->
+          <img src="/logo.png" alt="" width="26" height="26" draggable="false" />
           Stash
         </div>
         <div class="seg" id="tabs" role="tablist"></div>
@@ -376,7 +435,7 @@
     <div id="tagpop"></div>
     <div id="viewpop"></div>
     <div id="toast"></div>
-    <div id="drop">Drop files, images, text or links to add them to Stash</div>
+    <div id="drop">Drop files, folders, images, text or links to add them to Stash</div>
     <script type="module" src="/src/gallery.ts"></script>
   </body>
 </html>

@@ -37,6 +37,10 @@ pub struct Config {
     pub settings_autoclose: bool,
     /// Days trashed items are kept before they are deleted for good (0 = never).
     pub trash_days: u32,
+    /// Show items from folder imports in the gallery's All view (off: they stay under Imported and their tags).
+    pub show_imported: bool,
+    /// Keep the gallery loaded (hidden) after it closes, so it opens instantly. Costs memory while hidden.
+    pub keep_gallery_ready: bool,
     /// Look revision. Missing in configs written before M6 (reads as 0), which then get the new glass defaults.
     #[serde(default)]
     pub style_rev: u32,
@@ -91,6 +95,8 @@ pub struct Appearance {
     pub menu_anim: String,
     /// Length of that opening animation (ms), 100..600.
     pub menu_anim_ms: u16,
+    /// Animation frame-rate cap: 0 = the display refresh rate, else 15..=240 fps.
+    pub anim_fps: u16,
     /// Legacy (style_rev < 4) Slice pop-in switch; read once by `Config::migrate`, never written.
     #[serde(skip_serializing)]
     pub slice_pop: bool,
@@ -123,6 +129,7 @@ impl Default for Appearance {
             cursor_glow_lag: 90,
             menu_anim: "petals".into(),
             menu_anim_ms: 260,
+            anim_fps: 0,
             slice_pop: true,
             glass_clear: false,
         }
@@ -147,6 +154,9 @@ impl Appearance {
         self.cursor_glow = self.cursor_glow.min(100);
         self.cursor_glow_lag = self.cursor_glow_lag.min(400);
         self.menu_anim_ms = self.menu_anim_ms.clamp(100, 600);
+        if self.anim_fps != 0 {
+            self.anim_fps = self.anim_fps.clamp(15, 240);
+        }
         if !MENU_ANIMS.contains(&self.menu_anim.as_str()) {
             self.menu_anim = "petals".into();
         }
@@ -178,6 +188,8 @@ impl Default for Config {
             wheel_actions: crate::wheel::default_ids(),
             settings_autoclose: true,
             trash_days: 30,
+            show_imported: false,
+            keep_gallery_ready: true,
             glass: crate::theme::DEFAULT_GLASS.iter().map(|s| s.to_string()).collect(),
             style_rev: STYLE_REV,
         }

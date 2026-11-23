@@ -3,8 +3,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./theme.css";
+import { setFpsCap } from "./fps";
 
-interface Info { accent: string; glass: string[]; hover: string; appearance: { win_translucency: number; win_blur: number; win_saturation: number; glass_tint: number; ui_font: number; ui_radius: number; animations: boolean; cursor_glow: number; cursor_glow_on: boolean; cursor_glow_lag: number }; }
+interface Info { accent: string; glass: string[]; hover: string; appearance: { win_translucency: number; win_blur: number; win_saturation: number; glass_tint: number; ui_font: number; ui_radius: number; animations: boolean; cursor_glow: number; cursor_glow_on: boolean; cursor_glow_lag: number; anim_fps?: number }; }
 
 function luma(h: string) { const [r, g, b] = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)); return r * 0.299 + g * 0.587 + b * 0.114; }
 
@@ -37,6 +38,7 @@ function apply(info: Info) {
   set("--g-wash", (ap.glass_tint / 100).toFixed(2));
   root.dataset.clear = clear ? "1" : "0";
   root.dataset.motion = ap.animations ? "on" : "off";
+  setFpsCap(ap.anim_fps ?? 0, ap.animations);
   set("--glow", ((ap.cursor_glow ?? 0) / 100).toFixed(2));
   glowOn = ap.cursor_glow_on !== false && (ap.cursor_glow ?? 0) > 0;
   glowLag = ap.animations ? ap.cursor_glow_lag ?? 90 : 0;

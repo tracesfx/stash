@@ -144,6 +144,7 @@ fn wedge_at(dx: f32, dy: f32, dead: f32, n: usize) -> Option<usize> {
 /// Shows the wheel centred on `cursor` until `release` is set, Esc, or a click. Returns the chosen action.
 pub fn run(cursor: POINT, scale: f32, release: Arc<AtomicBool>, style: Style, frame: Option<Arc<Frame>>, acts: Vec<Action>) -> Option<Action> {
     unsafe {
+        let t_run = Instant::now();
         let scale = scale * style.wheel_size;
         let size = ((OUTER_R + MARGIN) * 2.0 * scale) as i32;
         let mon = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
@@ -226,14 +227,15 @@ pub fn run(cursor: POINT, scale: f32, release: Arc<AtomicBool>, style: Style, fr
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *st as *mut State as isize);
         present(hwnd, &mut st); // first (transparent) frame before showing: no flash
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        SetTimer(Some(hwnd), TIMER, 8, None);
+        tracing::info!("wheel visible {} ms after start", t_run.elapsed().as_millis());
+        let pacer = gfx::FramePacer::start(hwnd, TIMER);
 
         let mut msg = MSG::default();
         while !st.done && GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        let _ = KillTimer(Some(hwnd), TIMER);
+        drop(pacer);
         let _ = DestroyWindow(hwnd);
         let _ = DeleteDC(st.dib_dc);
         let _ = DeleteObject(dib.into());

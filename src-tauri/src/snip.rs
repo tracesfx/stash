@@ -152,6 +152,9 @@ pub fn begin(app: &AppHandle) {
         }
         let scale = winutil::monitor_at(cursor.x, cursor.y).scale;
         let frame = pending.as_ref().and_then(|p| p.frame.wait().ok());
+        if let Some(p) = &pending {
+            tracing::info!("wheel starting {} ms after key-down", p.started.elapsed().as_millis());
+        }
         let choice = wheel::run(cursor, scale, release, crate::theme::style(&app), frame, wheel::enabled(&app.state::<AppState>().cfg().wheel_actions));
         tracing::info!("wheel choice: {choice:?}");
         if let (Some(action), Some(p)) = (choice, pending) {

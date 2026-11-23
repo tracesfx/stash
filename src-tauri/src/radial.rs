@@ -156,6 +156,8 @@ struct St {
     flash: Option<(usize, Instant)>,
     done: bool,
     blink: Instant,
+    /// Caret blink phase of the last painted frame (ticks repaint only when something visible changed).
+    blink_phase: u128,
 }
 
 /// Runs the radial until it closes. Returns the toast that confirms the outcome (saved, starred, discarded).
@@ -229,19 +231,20 @@ fn run(mut req: Request, style: Style, seq: u64, t_req: Instant) -> Option<crate
             flash: None,
             done: false,
             blink: Instant::now(),
+            blink_phase: 0,
         });
         SetWindowLongPtrW(st.win.hwnd, GWLP_USERDATA, &mut *st as *mut St as isize);
         paint(&mut st);
         let _ = ShowWindow(st.win.hwnd, SW_SHOW);
         crate::winutil::bring_to_front(st.win.hwnd.0 as isize);
         tracing::info!("tag radial visible {} ms after request ({} tags)", t_req.elapsed().as_millis(), st.tags.len());
-        SetTimer(Some(st.win.hwnd), TIMER, 15, None);
+        let pacer = gfx::FramePacer::start(st.win.hwnd, TIMER);
         let mut msg = MSG::default();
         while !st.done && GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        let _ = KillTimer(Some(st.win.hwnd), TIMER);
+        drop(pacer);
         let restore = st.restore_focus && GetForegroundWindow() == st.win.hwnd;
         SetWindowLongPtrW(st.win.hwnd, GWLP_USERDATA, 0);
         let src = st.source_hwnd;
@@ -516,12 +519,21 @@ fn tick(st: &mut St) {
         begin_close(st, 0.0);
     }
     let (x, y) = client_cursor(st);
+    // repaint only when something on screen moves: the pacer ticks at the display rate (up to 240 Hz)
+    let age = st.t_open.elapsed().as_secs_f32() * 1000.0;
+    let mut dirty = age < gfx::open_total_ms(&st.style).max(OPEN_MS) + 40.0 || st.spin != 0.0 || st.closing.is_some();
     if st.style.glow > 0.0 {
         let (nx, ny) = gfx::GLOW_NUDGE;
         let style = st.style;
-        gfx::glow_follow(&mut st.glow_pos, (x + nx * st.s, y + ny * st.s), dt, &style);
+        dirty |= gfx::glow_follow(&mut st.glow_pos, (x + nx * st.s, y + ny * st.s), dt, &style);
     }
-    st.hover = if st.closing.is_some() { Hit::None } else { st.hit(x, y) };
+    let hover = if st.closing.is_some() { Hit::None } else { st.hit(x, y) };
+    dirty |= hover != st.hover;
+    st.hover = hover;
+    dirty |= st.flash.is_some_and(|(_, t)| t.elapsed().as_millis() < 260) || st.fav_t.is_some_and(|t| t.elapsed().as_millis() < 380);
+    let phase = st.blink.elapsed().as_millis() / 530;
+    dirty |= phase != st.blink_phase;
+    let leave0 = st.leave;
     if st.spin != 0.0 {
         st.spin -= st.spin * (1.0 - (-dt / 55.0).exp());
         if st.spin.abs() < 0.15 {
@@ -533,6 +545,7 @@ fn tick(st: &mut St) {
         let d = target - st.hprog[i];
         if d.abs() > 0.001 {
             st.hprog[i] += d.signum() * (dt / HOVER_MS).min(d.abs());
+            dirty = true;
         }
     }
     // No timer: it stays while the pointer is on it and disappears once the pointer moves off (unless the user
@@ -577,7 +590,9 @@ fn tick(st: &mut St) {
             return;
         }
     }
-    paint(st);
+    if dirty || st.leave != leave0 {
+        paint(st);
+    }
 }
 
 unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -721,6 +736,7 @@ fn wedge_path(c: (f32, f32), i: usize, n: usize, r_in: f32, r_out: f32, gap: f32
 }
 
 fn paint(st: &mut St) {
+    st.blink_phase = st.blink.elapsed().as_millis() / 530;
     let scene = render(st);
     let age = st.t_open.elapsed().as_secs_f32() * 1000.0;
     let (mut op, mut sc) = gfx::open_window(&st.style, age);
@@ -1256,6 +1272,7 @@ mod tests {
             flash: None,
             done: false,
             blink: Instant::now(),
+            blink_phase: 0,
         };
         st.field.set_text(typed);
         let scene = render(&mut st);

@@ -18,6 +18,7 @@ pub struct SettingsDto {
 }
 
 pub fn open(app: &AppHandle) {
+    crate::gallery::note_open("settings");
     let app = app.clone();
     std::thread::spawn(move || {
         if let Some(w) = app.get_webview_window("settings") {
@@ -126,6 +127,9 @@ fn apply(app: &AppHandle, new: Config) -> Result<Config> {
     *st.config.write().unwrap() = new.clone();
     if new.library_path != old.library_path {
         crate::tags::init(&new.library_path);
+    }
+    if new.keep_gallery_ready != old.keep_gallery_ready {
+        if new.keep_gallery_ready { crate::gallery::prewarm(app) } else { crate::gallery::release(app) }
     }
     let look_changed = serde_json::to_value(&new.appearance).ok() != serde_json::to_value(&old.appearance).ok() || new.glass != old.glass;
     if look_changed {

@@ -1,4 +1,5 @@
-// Gallery (SPEC §6, M7): Notes / Visuals / All / Favourites / Canvases / Trash tabs, one continuous masonry with day labels
+// Gallery (SPEC §6): All / Favourites / Trash tabs (Canvases and Hidden open from the sidebar; Notes, Visuals, Videos,
+// Captured and Imported are built-in tags), one continuous masonry with day labels
 // (short days share rows), tag collections, chip tagging, FLIP-animated layout changes, saved canvases and a trash
 // that empties itself. User text is only ever set through textContent.
 import "./theme";
@@ -6,19 +7,31 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
 import { open as pickFolder } from "@tauri-apps/plugin-dialog";
+import { mark, recordFrames } from "./perf";
+mark("script");
 
 interface Item {
   id: string; kind: string; created: string; method: string; caption: string; tags: string[];
   source_title: string; process: string; url: string | null; ext: string; name: string; bytes: number;
   mime: string; w: number | null; h: number | null; original_path: string | null;
   text: string | null; path: string; icon: string;
-  palette: string[]; ocr: string | null; trashed?: string | null; favorite?: boolean;
+  palette: string[]; ocr: string | null; trashed?: string | null; favorite?: boolean; hidden?: boolean;
 }
-type Tab = "notes" | "visuals" | "all" | "favs" | "canvases" | "trash";
+/** All / Favourites / Trash are the header tabs; Canvases and Hidden open from the sidebar. Notes, Visuals and
+ *  Videos are built-in tags (filters), like Captured and Imported. */
+type Tab = "all" | "favs" | "trash" | "hidden" | "canvases";
 interface CanvasInfo { id: string; name: string; created: string; modified: string; ids: string[] }
 interface CanvasDoc extends CanvasInfo { v: 2; pos: Record<string, [number, number]>; labels: { t: string; x: number; y: number }[]; pan: [number, number] | null; zoom: number }
 
-const PAGE = 160; // cards added per step of infinite scroll
+/** Cards built per step of infinite scroll: about two screens' worth for the current window and card size (a
+ *  filter or search re-lays out this many, so building far more than fits costs every keystroke). */
+function pageSize(): number {
+  const W = wrap?.clientWidth || 1200, H = wrap?.clientHeight || 800;
+  const col = Math.max(120, view?.size ?? 220);
+  const cols = Math.max(1, Math.floor(W / (col + 12)));
+  const rows = Math.ceil(H / (col * 0.7)) + 1;
+  return Math.max(40, Math.min(200, cols * rows * 2));
+}
 const LABEL_H = 30;
 const EASE = "cubic-bezier(.2, .8, .2, 1)", SPRING = "cubic-bezier(.34, 1.4, .5, 1)";
 /** Re-arranging (FLIP): a gentle ease in and a long, soft settle. */
@@ -44,30 +57,46 @@ const ICON = {
   plus: SVG('<path d="M8 3v10M3 8h10"/>'),
   star: SVG('<path d="M8 1.9l1.83 3.86 4.22.53-3.1 2.9.8 4.18L8 11.3l-3.75 2.07.8-4.18-3.1-2.9 4.22-.53z"/>'),
   canvas: '<svg viewBox="0 0 16 16"><rect x="2" y="2.5" width="5" height="4.5" rx="1"/><rect x="9" y="2.5" width="5" height="7" rx="1"/><rect x="2" y="9" width="5" height="4.5" rx="1"/><path d="M9 12.5h5"/></svg>',
+  hide: SVG('<path d="M2 8s2.2-4 6-4c1.2 0 2.2.4 3 .9M14 8s-2.2 4-6 4c-1.2 0-2.2-.4-3-.9M2.5 13.5l11-11"/><path d="M6.6 9.4a2 2 0 0 1 2.8-2.8"/>'),
+  show: SVG('<path d="M1.8 8S4 4 8 4s6.2 4 6.2 4S12 12 8 12 1.8 8 1.8 8z"/><circle cx="8" cy="8" r="2"/>'),
+  folder: SVG('<path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.5h5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/>'),
+  upload: SVG('<path d="M8 11V3M5 6l3-3 3 3M3 13.5h10"/>'),
+  paste: SVG('<rect x="3.5" y="3" width="9" height="11" rx="1.5"/><path d="M6 2.5h4v2H6z"/>'),
+  view: SVG('<circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14M5 7h4M7 5v4"/>'),
+  reveal: SVG('<path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.4 1.5h5A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/><path d="M8 7v3.5M6.5 9 8 10.5 9.5 9"/>'),
+  refresh: SVG('<path d="M13 8a5 5 0 1 1-1.5-3.5M13 2.5V5h-2.5"/>'),
 };
 
 let items: Item[] = [];
 let trashItems: Item[] = [];
 let canvases: CanvasInfo[] = [];
 let shown: Item[] = [];
-let limit = PAGE;
+let limit = 80;
 let selected = new Set<string>();
 let anchor = -1;
 let dragging = false;
 let toastTimer: number | undefined;
-const f = { date: "all", day: "", tag: "", app: "", color: "" };
+/** Active filters. `type`: notes | visuals | videos; `from`: captured | imported (the built-in tags). */
+const f = { date: "all", day: "", tag: "", app: "", color: "", type: "", from: "" };
+const NO_FILTER = { date: "all", day: "", tag: "", app: "", color: "", type: "", from: "" };
 let viewIdx = -1;
 let opening = true;
 let trashDays = 30;
+let showImported = false;
+let libraryPath = "";
 
 const store = { get: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } } };
 /** Gallery display (the View menu in the header; remembered on this PC). `size` = minimum card width. */
 interface ViewPrefs { size: number; gap: number; captions: boolean; days: boolean; sources: boolean; square: boolean }
 const VIEW_DEFAULT: ViewPrefs = { size: 220, gap: 14, captions: true, days: true, sources: true, square: false };
 const view: ViewPrefs = (() => { try { return { ...VIEW_DEFAULT, ...JSON.parse(store.get("stash.gallery.view") ?? "{}") }; } catch { return { ...VIEW_DEFAULT }; } })();
-const TABS: [Tab, string][] = [["notes", "Notes"], ["visuals", "Visuals"], ["all", "All"], ["favs", "Favourites"], ["canvases", "Canvases"], ["trash", "Trash"]];
-let tab: Tab = (TABS.some(([t]) => t === store.get("stash.gallery.tab")) ? store.get("stash.gallery.tab") : "all") as Tab;
-const itemTab = () => tab === "notes" || tab === "visuals" || tab === "all" || tab === "favs";
+const TABS: [Tab, string][] = [["all", "All"], ["favs", "Favourites"], ["trash", "Trash"]];
+let tab: Tab = (() => {
+  const s = store.get("stash.gallery.tab");
+  if (s === "notes" || s === "visuals") { f.type = s; return "all"; } // the old Notes / Visuals tabs are filters now
+  return (["all", "favs", "trash", "hidden", "canvases"].includes(s ?? "") ? s : "all") as Tab;
+})();
+const itemTab = () => tab === "all" || tab === "favs" || tab === "hidden";
 
 const enc = encodeURIComponent;
 const thumb = (it: Item) => `http://stash.localhost/thumb/${enc(it.id)}`;
@@ -118,6 +147,62 @@ function bucketOf(hex: string): string {
 }
 const hasColor = (it: Item, name: string) => it.palette.slice(0, 3).some((c) => bucketOf(c) === name);
 
+// ---------- built-in tags and filter keys ----------
+// A filter key names anything that can be starred (Favourite tags) or hidden: a plain tag ("moodboard"), a built-in
+// tag ("type:videos", "from:imported"), a colour ("color:blue") or an app ("app:chrome.exe").
+const isImported = (it: Item) => it.method === "import";
+const SYS: { key: string; label: string; test: (it: Item) => boolean; hint: string }[] = [
+  { key: "type:notes", label: "Notes", test: (it) => isNote(it), hint: "Text notes and links" },
+  { key: "type:visuals", label: "Visuals", test: (it) => isImg(it) || isVideo(it), hint: "Pictures and videos" },
+  { key: "type:videos", label: "Videos", test: (it) => isVideo(it), hint: "Recordings and video files" },
+  { key: "from:captured", label: "Captured", test: (it) => !isImported(it), hint: "Snipped, written, pasted or dropped in" },
+  { key: "from:imported", label: "Imported", test: (it) => isImported(it), hint: "From folder imports (kept out of All)" },
+];
+const sysOf = (key: string) => SYS.find((s) => s.key === key);
+const lc = (s: string) => s.toLowerCase();
+function matchKey(it: Item, key: string): boolean {
+  const s = sysOf(key);
+  if (s) return s.test(it);
+  if (key.startsWith("color:")) return hasColor(it, key.slice(6));
+  if (key.startsWith("app:")) return lc(it.process) === lc(key.slice(4));
+  return it.tags.some((t) => lc(t) === lc(key));
+}
+function keyLabel(key: string): string {
+  const s = sysOf(key);
+  if (s) return s.label;
+  if (key.startsWith("color:")) return key.slice(6).replace(/^./, (c) => c.toUpperCase());
+  if (key.startsWith("app:")) return key.slice(4).replace(/\.exe$/i, "");
+  return "#" + key;
+}
+const keySwatch = (key: string) => (key.startsWith("color:") ? BUCKETS.find(([n]) => n === key.slice(6))?.[1] : undefined);
+/** The filter that a key stands for is on. */
+function keyActive(key: string): boolean {
+  if (key.startsWith("type:")) return f.type === key.slice(5);
+  if (key.startsWith("from:")) return f.from === key.slice(5);
+  if (key.startsWith("color:")) return f.color === key.slice(6);
+  if (key.startsWith("app:")) return lc(f.app) === lc(key.slice(4));
+  return lc(f.tag) === lc(key);
+}
+/** Turns the filter a key stands for on (or off when it is on already). */
+function setKeyFilter(key: string, on: boolean) {
+  if (key.startsWith("type:")) f.type = on ? key.slice(5) : "";
+  else if (key.startsWith("from:")) f.from = on ? key.slice(5) : "";
+  else if (key.startsWith("color:")) f.color = on ? key.slice(6) : "";
+  else if (key.startsWith("app:")) f.app = on ? key.slice(4) : "";
+  else f.tag = on ? key : "";
+}
+function toggleKey(key: string, only = false) {
+  setKeyFilter(key, !keyActive(key) || only);
+  if (tab === "canvases" || tab === "trash") setTab("all", "none");
+  renderRail();
+  filter("switch");
+}
+
+// ---------- hidden ----------
+let hiddenTags: string[] = [];
+const isHiddenKey = (k: string) => hiddenTags.some((x) => lc(x) === lc(k));
+const isHidden = (it: Item) => !!it.hidden || hiddenTags.some((k) => matchKey(it, k));
+
 // ---------- days ----------
 const pad = (n: number) => String(n).padStart(2, "0");
 const keyOf = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -129,7 +214,14 @@ function dayKey(it: Item): string {
   if (!k) { k = keyOf(new Date(when)); dayCache.set(ck, k); }
   return k;
 }
+const labelCache = new Map<string, string>();
 function dayLabel(key: string, long = false): string {
+  const ck = `${key}|${long ? 1 : 0}|${keyOf(new Date())}`; // "Today" moves at midnight
+  let l = labelCache.get(ck);
+  if (l === undefined) { l = dayLabelOf(key, long); labelCache.set(ck, l); }
+  return l;
+}
+function dayLabelOf(key: string, long = false): string {
   const [y, m, d] = key.split("-").map(Number);
   const date = new Date(y, m - 1, d);
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -156,8 +248,14 @@ function ago(iso: string): string {
 
 // ---------- data ----------
 const sig = (l: Item[]) => l.map((i) => i.id + cardVer(i)).join();
+/** Fingerprint of the list we hold: Rust answers "unchanged" (no items) while it still matches. */
+let listFp: string | null = null;
 async function load(animate = false) {
-  const next = await invoke<Item[]>("gallery_list");
+  const r = await invoke<{ fp: string; items: Item[] | null }>("gallery_list", { since: items.length ? listFp : null });
+  if (!r.items) return; // nothing changed
+  listFp = r.fp;
+  const next = r.items;
+  if (opening) mark(`list(${next.length})`);
   if (items.length && sig(next) === sig(items)) return; // nothing changed: keep scroll, selection and cards
   items = next;
   pruneCards();
@@ -182,7 +280,13 @@ function pruneCards() {
   for (const k of [...cardCache.keys()]) if (!ids.has(k.slice(k.indexOf(":") + 1))) cardCache.delete(k);
 }
 
+const hayCache = new WeakMap<Item, string>();
 function haystack(it: Item) {
+  let h = hayCache.get(it);
+  if (h === undefined) { h = haystackOf(it); hayCache.set(it, h); }
+  return h;
+}
+function haystackOf(it: Item) {
   return [it.caption, it.tags.join(" "), it.source_title, it.process, it.url ?? "", it.name, it.text ?? "", it.ocr ?? "", it.kind, it.method, it.created.slice(0, 10)].join("\n").toLowerCase();
 }
 
@@ -193,8 +297,16 @@ function inDate(it: Item): boolean {
   const day = 86400000;
   return f.date === "today" ? keyOf(new Date(it.created)) === keyOf(new Date()) : f.date === "week" ? age < 7 * day : age < 30 * day;
 }
-const inTab = (it: Item) => tab === "all" || tab === "trash" || (tab === "favs" ? !!it.favorite : (tab === "notes") === isNote(it));
-const pool = () => (tab === "trash" ? trashItems : items.filter(inTab));
+/** Everything the current tab holds: the trash, the hidden items, or the rest (favourites only on Favourites). */
+function pool(): Item[] {
+  if (tab === "trash") return trashItems;
+  if (tab === "hidden") return items.filter(isHidden);
+  return items.filter((it) => !isHidden(it) && (tab !== "favs" || !!it.favorite));
+}
+/** Folder imports stay out of All unless asked for: the Imported tag, any tag (e.g. the folder's), a search, or
+ *  Settings > Show imported items. */
+const importedOk = () => showImported || tab !== "all" || f.from === "imported" || !!f.tag || q.value.trim() !== "";
+const viewPool = () => (importedOk() ? pool() : pool().filter((it) => !isImported(it)));
 const hasTag = (it: Item, t: string) => it.tags.some((x) => x.toLowerCase() === t.toLowerCase());
 
 /** Recomputes the shown list and re-lays out. `anim`: "none" (instant), "flip" (keep cards, animate the
@@ -202,26 +314,29 @@ const hasTag = (it: Item, t: string) => it.tags.some((x) => x.toLowerCase() === 
 function filter(anim: Anim = "none") {
   if (!itemTab() && tab !== "trash") return;
   const terms = q.value.toLowerCase().split(/\s+/).filter(Boolean);
-  shown = pool().filter((it) => {
+  const base = viewPool();
+  shown = base.filter((it) => {
     if (f.tag && !hasTag(it, f.tag)) return false;
-    if (f.app && it.process !== f.app) return false;
+    if (f.app && lc(it.process) !== lc(f.app)) return false;
     if (f.color && !hasColor(it, f.color)) return false;
+    if (f.type && !matchKey(it, "type:" + f.type)) return false;
+    if (f.from && !matchKey(it, "from:" + f.from)) return false;
     if (!inDate(it)) return false;
     const h = haystack(it);
     return terms.every((t) => {
-      if (t.startsWith("#")) return it.tags.some((x) => x.toLowerCase().includes(t.slice(1)));
+      if (t.startsWith("#")) return it.tags.some((x) => x.toLowerCase().includes(t.slice(1))) || SYS.some((s) => lc(s.label).startsWith(t.slice(1)) && s.test(it));
       if (t.startsWith("type:")) return it.kind.startsWith(t.slice(5));
       if (t.startsWith("color:")) return it.palette.slice(0, 3).some((c) => bucketOf(c).startsWith(t.slice(6)));
       if (t.startsWith("app:")) return it.process.toLowerCase().replace(/\.exe$/, "").startsWith(t.slice(4));
       return h.includes(t);
     });
   });
-  if (anim === "switch") limit = PAGE;
-  limit = Math.max(PAGE, Math.min(limit, shown.length));
+  if (anim === "switch") limit = pageSize();
+  limit = Math.max(pageSize(), Math.min(limit, shown.length));
   renderChips();
   renderTrashBar();
-  const total = pool().length;
-  count.textContent = tab === "trash" ? `${total} in trash` : shown.length === total ? `${total} items` : `${shown.length} of ${total}`;
+  const total = base.length;
+  count.textContent = tab === "trash" ? `${total} in trash` : tab === "hidden" ? `${total} hidden` : shown.length === total ? `${total} items` : `${shown.length} of ${total}`;
   renderEmpty();
   if (anim === "switch") { wrap.scrollTop = 0; smooth.stop(); }
   layout(opening ? "none" : anim);
@@ -237,8 +352,10 @@ function renderEmpty() {
     empty.append(el("h2", "", "The trash is empty"), el("div", "", "Deleted items wait here so you can restore them."));
   } else if (tab === "favs" && !items.some((i) => i.favorite)) {
     empty.append(el("h2", "", "No favourites yet"), el("div", "", "Star anything with the ☆ on its card, F, or the star in the middle of the tag menu after a capture."));
+  } else if (tab === "hidden" && !pool().length) {
+    empty.append(el("h2", "", "Nothing is hidden"), el("div", "", "Right-click an item (or press H) to hide it, or right-click a tag in the sidebar to hide everything with that tag."));
   } else if (items.length) {
-    empty.append(el("h2", "", "Nothing here"), el("div", "", tab === "notes" ? "No notes match. Try All, or clear a filter." : "Try another tab, or clear a filter or the search."));
+    empty.append(el("h2", "", "Nothing here"), el("div", "", f.type === "notes" ? "No notes match. Clear a filter or the search." : "Try another tab, or clear a filter or the search."));
   } else {
     const hint = el("div");
     hint.append("Tap ", Object.assign(el("kbd"), { textContent: "Ctrl" }), " ", Object.assign(el("kbd"), { textContent: "Alt" }), " ", Object.assign(el("kbd"), { textContent: "S" }), " to snip, hold it for the wheel, or drop / paste (Ctrl+V) anything here.");
@@ -253,7 +370,8 @@ function seg(host: HTMLElement, opts: [string, string][], cur: () => string, pic
   const btns: HTMLButtonElement[] = [];
   const move = () => {
     const b = btns.find((x) => x.dataset.v === cur());
-    if (!b) return;
+    ind.style.opacity = b ? "" : "0"; // Canvases / Hidden (opened from the sidebar) have no header tab
+    if (!b) { btns.forEach((x) => x.classList.remove("on")); return; }
     ind.style.width = `${b.offsetWidth}px`;
     ind.style.transform = `translateX(${b.offsetLeft}px)`;
     btns.forEach((x) => x.classList.toggle("on", x === b));
@@ -262,7 +380,7 @@ function seg(host: HTMLElement, opts: [string, string][], cur: () => string, pic
     const b = el("button", "", label);
     b.dataset.v = v;
     b.setAttribute("role", "tab");
-    b.onclick = () => { if (cur() !== v) { pick(v); move(); } else if (v === "canvases" && cv.doc) closeCanvasDoc(); };
+    b.onclick = () => { if (cur() !== v) { pick(v); move(); } };
     btns.push(b);
     host.append(b);
   }
@@ -275,12 +393,13 @@ function setTab(t: Tab, anim: Anim = "switch") {
   const was = tab;
   tab = t;
   store.set("stash.gallery.tab", t);
-  if ((was === "trash") !== (t === "trash")) selected.clear();
+  if ((was === "trash") !== (t === "trash") || (was === "hidden") !== (t === "hidden")) selected.clear();
   updateSelBar();
   showDetail();
   const canv = t === "canvases";
   wrap.style.display = canv ? "none" : "";
   chipsEl.style.display = canv ? "none" : "";
+  moveTabInd();
   if (canv) { scrub.classList.add("off"); daypill.classList.remove("on"); tbar.classList.remove("on"); count.textContent = `${canvases.length} canvas${canvases.length === 1 ? "" : "es"}`; }
   renderRail();
   if (canv) {
@@ -298,22 +417,30 @@ function setTab(t: Tab, anim: Anim = "switch") {
 
 function renderChips() {
   chipsEl.replaceChildren();
-  const chip = (label: string, clear: () => void) => {
+  const chip = (label: string, clear: () => void, key?: string) => {
     const c = el("button", "chip", label);
     const x = el("b", "", "×");
     c.append(x);
     c.title = "Remove filter";
     c.onclick = () => { clear(); renderRail(); filter("flip"); };
+    if (key) {
+      const sw = keySwatch(key);
+      if (sw) { const d = el("i", "sw"); d.style.background = sw; c.prepend(d); }
+      c.prepend(tagStar(key)); // any filter can be a favourite tag
+      c.dataset.key = key; // right-click: hide / pin
+    }
     chipsEl.append(c);
   };
   if (f.day) chip(dayLabel(f.day, true), () => (f.day = ""));
   else if (f.date !== "all") chip({ today: "Today", week: "This week", month: "This month" }[f.date] ?? f.date, () => (f.date = "all"));
-  if (f.tag) { chip("#" + f.tag, () => (f.tag = "")); chipsEl.lastElementChild!.prepend(tagStar(f.tag)); }
-  if (f.app) chip(f.app.replace(/\.exe$/i, ""), () => (f.app = ""));
-  if (f.color) chip(f.color, () => (f.color = ""));
+  if (f.type) chip(keyLabel("type:" + f.type), () => (f.type = ""), "type:" + f.type);
+  if (f.from) chip(keyLabel("from:" + f.from), () => (f.from = ""), "from:" + f.from);
+  if (f.tag) chip("#" + f.tag, () => (f.tag = ""), f.tag);
+  if (f.app) chip(keyLabel("app:" + f.app), () => (f.app = ""), "app:" + f.app);
+  if (f.color) chip(keyLabel("color:" + f.color), () => (f.color = ""), "color:" + f.color);
   if (chipsEl.childElementCount > 1) {
     const all = el("button", "chip", "Clear all");
-    all.onclick = () => { Object.assign(f, { date: "all", day: "", tag: "", app: "", color: "" }); renderRail(); filter("flip"); };
+    all.onclick = () => { Object.assign(f, NO_FILTER); renderRail(); filter("flip"); };
     chipsEl.append(all);
   }
   chipsEl.classList.toggle("on", chipsEl.childElementCount > 0);
@@ -321,7 +448,8 @@ function renderChips() {
 
 let emptyArmed = 0;
 function renderTrashBar() {
-  tbar.classList.toggle("on", tab === "trash");
+  tbar.classList.toggle("on", tab === "trash" || tab === "hidden");
+  if (tab === "hidden") { renderHiddenBar(); return; }
   if (tab !== "trash") return;
   tbar.replaceChildren(el("span", "", trashDays > 0 ? `Items are deleted for good ${trashDays} day${trashDays === 1 ? "" : "s"} after you trash them (Settings › General).` : "Items stay here until you empty the trash."), el("span", "grow"));
   if (trashItems.length) {
@@ -341,6 +469,57 @@ function renderTrashBar() {
   }
 }
 
+/** Hidden view: what is hidden by tag (each with an Unhide) and how to hide more. */
+function renderHiddenBar() {
+  tbar.replaceChildren();
+  if (!hiddenTags.length) {
+    tbar.append(el("span", "", "Hidden items stay out of every other view. Right-click an item or a tag to hide it."));
+    return;
+  }
+  tbar.append(el("span", "", "Hidden tags:"));
+  for (const k of hiddenTags) {
+    const c = el("button", "chip htag", keyLabel(k));
+    const sw = keySwatch(k);
+    if (sw) { const d = el("i", "sw"); d.style.background = sw; c.prepend(d); }
+    const x = el("b");
+    x.innerHTML = ICON.show; // static markup
+    c.append(x);
+    c.title = `Unhide ${keyLabel(k)}: its items go back to the gallery`;
+    c.onclick = () => setHiddenTag(k, false);
+    tbar.append(c);
+  }
+}
+
+async function setHiddenTag(key: string, on: boolean) {
+  const before = hiddenTags;
+  hiddenTags = on ? [...hiddenTags.filter((k) => lc(k) !== lc(key)), key] : hiddenTags.filter((k) => lc(k) !== lc(key));
+  try { await invoke("gallery_set_hidden_tags", { tags: hiddenTags }); } catch (e) { hiddenTags = before; flash(String(e)); return; }
+  if (on && keyActive(key)) toggleKey(key); // its items just left this view: drop the filter that showed them
+  selected = new Set([...selected].filter((id) => { const it = byId(id); return it && (tab === "hidden") === isHidden(it); }));
+  updateSelBar();
+  showDetail();
+  renderRail();
+  filter("flip");
+  flash(on ? `${keyLabel(key)} is hidden. Its items are in Hidden.` : `${keyLabel(key)} is visible again`, { label: "Undo", fn: () => setHiddenTag(key, !on) });
+}
+
+/** Hides / unhides items (each one, regardless of its tags). */
+async function setHidden(ids: string[], on: boolean) {
+  const list = ids.map((id) => byId(id)).filter((i): i is Item => !!i && !i.trashed);
+  if (!list.length) return;
+  try { await invoke("gallery_hide", { ids: list.map((i) => i.id), on }); } catch (e) { flash(String(e)); return; }
+  for (const it of list) { it.hidden = on; refreshItem(it); }
+  selected.clear();
+  updateSelBar();
+  showDetail();
+  renderRail();
+  filter("flip");
+  const byTag = !on ? list.filter(isHidden).length : 0; // still hidden by one of their tags
+  const n = list.length;
+  flash(on ? `Hid ${n} item${n === 1 ? "" : "s"}${tab === "hidden" ? "" : " (see Hidden in the sidebar)"}` : byTag ? `Unhid ${n}; ${byTag} still hidden by a hidden tag` : `Unhid ${n} item${n === 1 ? "" : "s"}`,
+    { label: "Undo", fn: () => setHidden(list.map((i) => i.id), !on) });
+}
+
 // ---------- rail: collections, dates, colours, apps (or the list of canvases) ----------
 function railItem(label: string, n: number | null, on: boolean, onclick: () => void) {
   const b = el("button", "ri" + (on ? " on" : ""));
@@ -351,26 +530,51 @@ function railItem(label: string, n: number | null, on: boolean, onclick: () => v
 }
 let showAllTags = false;
 let favTags: string[] = [];
-const isFavTag = (t: string) => favTags.some((x) => x.toLowerCase() === t.toLowerCase());
-async function toggleFavTag(t: string) {
-  const on = !isFavTag(t);
-  favTags = on ? [...favTags, t] : favTags.filter((x) => x.toLowerCase() !== t.toLowerCase());
+const isFavTag = (k: string) => favTags.some((x) => lc(x) === lc(k));
+async function toggleFavTag(k: string) {
+  const on = !isFavTag(k);
+  favTags = on ? [...favTags, k] : favTags.filter((x) => lc(x) !== lc(k));
   renderRail();
+  renderChips();
   try { await invoke("gallery_set_fav_tags", { tags: favTags }); } catch (e) { flash(String(e)); return; }
-  flash(on ? `#${t} pinned to Favourite tags` : `#${t} unpinned`);
+  flash(on ? `${keyLabel(k)} pinned to Favourite tags` : `${keyLabel(k)} unpinned`);
 }
-/** Star inside a rail row or tile (a span: rows are buttons already). */
-function tagStar(t: string): HTMLElement {
-  const st = el("span", "tstar" + (isFavTag(t) ? " on" : ""));
+/** Star inside a rail row, tile or filter chip (a span: rows are buttons already). Works for any filter key. */
+function tagStar(k: string): HTMLElement {
+  const st = el("span", "tstar" + (isFavTag(k) ? " on" : ""));
   st.innerHTML = ICON.star; // static markup
-  st.title = isFavTag(t) ? `Unpin #${t} from Favourite tags` : `Pin #${t} to Favourite tags`;
-  st.addEventListener("click", (e) => { e.stopPropagation(); toggleFavTag(t); });
+  st.title = isFavTag(k) ? `Unpin ${keyLabel(k)} from Favourite tags` : `Pin ${keyLabel(k)} to Favourite tags`;
+  st.addEventListener("click", (e) => { e.stopPropagation(); toggleFavTag(k); });
   return st;
+}
+/** A sidebar row for a filter key: star, label (with a colour dot), count; right-click for hide / pin. */
+function keyRow(k: string, n: number, star: "lead" | "trail" = "trail"): HTMLElement {
+  const b = railItem(keyLabel(k), n, keyActive(k), () => toggleKey(k));
+  b.dataset.key = k;
+  const sw = keySwatch(k);
+  if (sw) { const d = el("i", "sw"); d.style.background = sw; b.prepend(d); }
+  if (star === "lead") { b.classList.add("ft"); b.prepend(tagStar(k)); } else b.append(tagStar(k));
+  const s = sysOf(k);
+  if (s) b.title = s.hint;
+  return b;
 }
 function renderRail() {
   rail.replaceChildren();
   const section = (title: string, nodes: HTMLElement[]) => { if (nodes.length) rail.append(el("div", "rh", title), ...nodes); };
+  // places that are not header tabs
+  const hiddenN = items.filter(isHidden).length;
+  const place = (t: Tab, label: string, icon: string, n: number) => {
+    const b = railItem(label, n, tab === t, () => { if (tab !== t) setTab(t); else if (t === "canvases" && cv.doc) closeCanvasDoc(); });
+    b.classList.add("place");
+    const i = el("span", "pi");
+    i.innerHTML = icon; // static markup
+    b.prepend(i);
+    return b;
+  };
+  const places = [place("canvases", "Canvases", ICON.canvas, canvases.length), place("hidden", "Hidden", ICON.hide, hiddenN)];
+
   if (tab === "canvases") {
+    section("Places", places);
     section("Canvases", [
       railItem("All canvases", canvases.length, !cv.doc, () => closeCanvasDoc()),
       ...canvases.map((c) => railItem(c.name || "Untitled canvas", c.ids.length, cv.doc?.id === c.id, () => openCanvasDoc(c.id))),
@@ -378,17 +582,18 @@ function renderRail() {
     return;
   }
   const p = pool();
+  const vp = viewPool();
+  const count = (k: string) => p.filter((it) => matchKey(it, k)).length;
 
-  // favourite tags: always first
-  if (tab !== "trash" && favTags.length) {
-    const counts = new Map<string, number>();
-    for (const it of items) for (const t of it.tags) counts.set(t.toLowerCase(), (counts.get(t.toLowerCase()) ?? 0) + 1);
-    section("Favourite tags", favTags.map((t) => {
-      const b = railItem("#" + t, counts.get(t.toLowerCase()) ?? 0, f.tag.toLowerCase() === t.toLowerCase(), () => { f.tag = f.tag.toLowerCase() === t.toLowerCase() ? "" : t; renderRail(); filter("switch"); });
-      b.classList.add("ft");
-      b.prepend(tagStar(t));
-      return b;
-    }));
+  // favourite tags (any filter): always first
+  if (tab !== "trash" && favTags.length) section("Favourite tags", favTags.map((k) => keyRow(k, count(k), "lead")));
+
+  if (tab !== "trash") section("Places", places);
+
+  // built-in tags: what an item is and where it came from
+  if (tab !== "trash") {
+    const rows = SYS.map((s) => ({ s, n: count(s.key) })).filter(({ s, n }) => n > 0 || keyActive(s.key)).map(({ s, n }) => keyRow(s.key, n));
+    section("Kinds", rows);
   }
 
   // collections: tags with a cover (newest image with that tag, else a text snippet)
@@ -412,19 +617,15 @@ function renderRail() {
         else b.append(el("span", "sn", (it.text ?? it.caption ?? "").slice(0, 120)));
         b.append(el("b", "", "#" + name), el("i", "", `${n} item${n === 1 ? "" : "s"}`));
         b.title = `#${name}`;
-        b.onclick = () => { f.tag = f.tag.toLowerCase() === k ? "" : name; renderRail(); filter("switch"); };
+        b.dataset.key = name;
+        b.onclick = () => toggleKey(name);
         b.append(tagStar(name));
         tiles.append(b);
       }
       const rest = ranked.slice(6);
       const nodes: HTMLElement[] = [tiles];
       if (rest.length) {
-        if (showAllTags) for (const [k, n] of rest) {
-          const name = names.get(k)!;
-          const r = railItem("#" + name, n, f.tag.toLowerCase() === k, () => { f.tag = f.tag.toLowerCase() === k ? "" : name; renderRail(); filter("switch"); });
-          r.append(tagStar(name));
-          nodes.push(r);
-        }
+        if (showAllTags) for (const [k, n] of rest) nodes.push(keyRow(names.get(k)!, n));
         const more = el("button", "ri more", showAllTags ? "Fewer tags" : `${rest.length} more tag${rest.length === 1 ? "" : "s"}`);
         more.onclick = () => { showAllTags = !showAllTags; renderRail(); };
         nodes.push(more);
@@ -434,7 +635,7 @@ function renderRail() {
   }
 
   section("Library", [["all", "All time"], ["today", "Today"], ["week", "This week"], ["month", "This month"]].map(([v, l]) =>
-    railItem(l, v === "all" ? p.length : null, !f.day && f.date === v, () => { f.date = v; f.day = ""; renderRail(); filter("switch"); })));
+    railItem(l, v === "all" ? vp.length : null, !f.day && f.date === v, () => { f.date = v; f.day = ""; renderRail(); filter("switch"); })));
 
   if (opening) Array.from(rail.children).forEach((c, i) => (c as HTMLElement).style.setProperty("--i", String(Math.min(i, 24))));
 }
@@ -471,8 +672,10 @@ function daysLeft(it: Item): string {
 
 // Card elements are cached per layout kind and re-used, so their images stay decoded across view changes.
 const cardCache = new Map<string, { el: HTMLElement; v: string }>();
-const cardVer = (it: Item) => `${it.caption}|${it.tags.join(",")}|${it.palette.length}|${it.w ?? ""}|${it.trashed ?? ""}|${it.favorite ? 1 : 0}`;
-const cardKind = () => (tab === "notes" ? "note" : tab === "trash" ? "trash" : "card");
+const cardVer = (it: Item) => `${it.caption}|${it.tags.join(",")}|${it.palette.length}|${it.w ?? ""}|${it.trashed ?? ""}|${it.favorite ? 1 : 0}|${it.hidden ? 1 : 0}`;
+/** Notes filter: notes as a readable list. Hidden view: cards with an Unhide button. */
+const notesView = () => f.type === "notes" && tab !== "trash";
+const cardKind = () => (tab === "trash" ? "trash" : tab === "hidden" ? "hid" : notesView() ? "note" : "card");
 function cardFor(it: Item, eager: boolean): HTMLElement {
   const k = `${cardKind()}:${it.id}`;
   const v = cardVer(it);
@@ -490,6 +693,40 @@ function cardFor(it: Item, eager: boolean): HTMLElement {
   return c;
 }
 
+/** Pictures load when near the viewport (our own observer instead of loading=lazy, so the placeholder sweep runs
+ *  only on cards that are actually loading, never on far-off ones). */
+const lazyIO = new IntersectionObserver((es) => {
+  for (const e of es) if (e.isIntersecting) startLoad(e.target as HTMLImageElement);
+}, { root: wrap, rootMargin: "1200px 0px" });
+function startLoad(img: HTMLImageElement) {
+  lazyIO.unobserve(img);
+  if (!img.dataset.src) return;
+  img.closest(".card")?.classList.add("ld");
+  img.src = img.dataset.src;
+  delete img.dataset.src;
+}
+function thumbImg(c: HTMLElement, it: Item, eager: boolean, fallbackRatio: string): HTMLImageElement {
+  const img = el("img");
+  img.draggable = false;
+  img.decoding = "async";
+  img.style.aspectRatio = it.w && it.h ? `${it.w} / ${it.h}` : fallbackRatio;
+  img.onload = () => {
+    img.classList.add("ok");
+    c.classList.remove("ld");
+    if (!it.w && img.naturalWidth) {
+      hCache.delete(c);
+      // the sidecar had no size: take the thumbnail's and re-flow
+      it.w = img.naturalWidth; it.h = img.naturalHeight;
+      img.style.aspectRatio = `${it.w} / ${it.h}`;
+      relayoutSoon();
+    }
+  };
+  img.dataset.src = thumb(it);
+  if (eager) startLoad(img);
+  else lazyIO.observe(img);
+  return img;
+}
+
 function card(it: Item, eager = false): HTMLElement {
   const c = el("div", "card tile" + (selected.has(it.id) ? " sel" : "") + (it.favorite && tab !== "trash" ? " fav" : ""));
   c.dataset.id = it.id;
@@ -499,29 +736,41 @@ function card(it: Item, eager = false): HTMLElement {
   // text cards: the star is one of the hover buttons, and a small gold star marks a favourite when not hovered
   if (tab !== "trash" && !media && it.favorite) { const m = el("span", "fmark"); m.innerHTML = ICON.star; c.append(m); } // static markup
   if (isImg(it)) {
-    const img = el("img");
-    img.loading = eager ? "eager" : "lazy";
-    img.draggable = false;
-    img.style.aspectRatio = it.w && it.h ? `${it.w} / ${it.h}` : "4 / 3";
-    img.onload = () => {
-      img.classList.add("ok");
-      if (!it.w && img.naturalWidth) {
-        // the sidecar had no size: take the thumbnail's and re-flow
-        it.w = img.naturalWidth; it.h = img.naturalHeight;
-        img.style.aspectRatio = `${it.w} / ${it.h}`;
-        relayoutSoon();
-      }
-    };
-    img.src = thumb(it);
-    c.append(img);
+    c.append(thumbImg(c, it, eager, "4 / 3"));
   } else if (isVideo(it)) {
-    const v = el("video");
-    v.muted = true; v.loop = true; v.preload = "metadata"; v.draggable = false;
-    v.style.aspectRatio = it.w && it.h ? `${it.w} / ${it.h}` : "16 / 9";
-    v.src = full(it) + "#t=0.1";
-    c.addEventListener("mouseenter", () => { v.play().catch(() => {}); });
-    c.addEventListener("mouseleave", () => { v.pause(); v.currentTime = 0.1; });
-    c.append(v, el("span", "vbadge", "▶"));
+    // a poster picture (made once in Rust); the <video> only exists while the pointer is on the card, so opening
+    // the gallery never starts a video pipeline per card
+    const img = thumbImg(c, it, eager, "16 / 9");
+    c.append(img);
+    img.onerror = () => { // no poster (a format Media Foundation cannot read): the old in-place preview
+      c.classList.remove("ld");
+      const v = el("video");
+      v.muted = true; v.loop = true; v.preload = "metadata"; v.draggable = false;
+      v.style.aspectRatio = img.style.aspectRatio;
+      v.src = full(it) + "#t=0.1";
+      img.replaceWith(v);
+    };
+    let v: HTMLVideoElement | null = null;
+    c.addEventListener("mouseenter", () => {
+      if (c.querySelector("img") !== img || v) return;
+      v = el("video", "vplay");
+      v.muted = true; v.loop = true; v.draggable = false; v.playsInline = true;
+      v.addEventListener("playing", () => v?.classList.add("on"), { once: true });
+      v.src = full(it);
+      // over the poster only (a caption below it stays visible)
+      Object.assign(v.style, { top: img.offsetTop + "px", left: img.offsetLeft + "px", width: img.offsetWidth + "px", height: img.offsetHeight + "px" });
+      c.insertBefore(v, img.nextSibling);
+      v.play().catch(() => {});
+    });
+    c.addEventListener("mouseleave", () => {
+      const pv = c.querySelector("video");
+      if (pv && !v) { pv.pause(); pv.currentTime = 0.1; return; } // fallback preview
+      if (!v) return;
+      const old = v; v = null;
+      old.pause(); old.classList.remove("on");
+      setTimeout(() => { old.removeAttribute("src"); old.load(); old.remove(); }, 180); // releases the decoder
+    });
+    c.append(el("span", "vbadge", "▶"));
   } else if (it.kind === "text" || it.kind === "link" || isTextFile(it)) {
     const t = el("div", "t" + (it.kind === "link" ? " link" : ""), it.text ?? "");
     if (isTextFile(it)) { t.classList.add("code"); t.append(el("span", "badge", it.ext)); }
@@ -539,12 +788,18 @@ function card(it: Item, eager = false): HTMLElement {
     acts.append(actBtn(ICON.restore, "Restore", () => restore([it.id])), actBtn(ICON.trash, "Delete forever", () => purge([it.id]), "d"));
   } else {
     if (!media) acts.append(actBtn(ICON.star, it.favorite ? "Remove from Favourites (F)" : "Add to Favourites (F)", () => setFav([it.id], !it.favorite), "fs" + (it.favorite ? " on" : "")));
-    if (canCopy(it)) acts.append(actBtn(ICON.copy, "Copy", () => copyItem(it)));
-    if (it.url) acts.append(actBtn(ICON.open, "Open source page", () => invoke("gallery_open_url", { url: it.url })));
-    if (!it.favorite) acts.append(actBtn(ICON.trash, "Move to trash (with the rest of the selection when it is selected)", () => trash(selected.has(it.id) ? [...selected] : [it.id]), "d"));
+    itemActs(it, acts);
   }
   c.append(acts);
   return c;
+}
+/** Hover buttons shared by gallery cards and note rows: copy, source page, unhide (Hidden view), trash. */
+function itemActs(it: Item, acts: HTMLElement) {
+  const group = () => (selected.has(it.id) ? [...selected] : [it.id]);
+  if (canCopy(it)) acts.append(actBtn(ICON.copy, "Copy", () => copyItem(it)));
+  if (it.url) acts.append(actBtn(ICON.open, "Open source page", () => invoke("gallery_open_url", { url: it.url })));
+  if (tab === "hidden") acts.append(actBtn(ICON.show, it.hidden ? "Unhide (H)" : "Hidden by a hidden tag: unhide the tag from the bar above", () => setHidden(group(), false)));
+  if (!it.favorite) acts.append(actBtn(ICON.trash, "Move to trash (Delete; with the rest of the selection when it is selected)", () => trash(group()), "d"));
 }
 
 /** Notes tab card: the note itself, then where it came from (the page title, e.g. the YouTube video). */
@@ -568,6 +823,9 @@ function noteRow(it: Item): HTMLElement {
   for (const t of it.tags.slice(0, 4)) s.append(el("span", "tg", "#" + t));
   s.append(el("span", "tm", timeOf(it)));
   c.append(s);
+  const acts = el("div", "acts");
+  itemActs(it, acts);
+  c.append(acts);
   return c;
 }
 
@@ -621,7 +879,51 @@ function leave(node: HTMLElement, animate: boolean, from: Pos | null) {
   a.onfinish = () => { if (node.classList.contains("leaving")) node.remove(); };
 }
 
+// ---------- virtualization ----------
+// Only tiles within a screen and a half of the viewport are in the page; the rest keep their computed position
+// and measured height and are re-attached as you scroll near. Layer and paint work then stays the same at any
+// scroll depth (with every card attached, each repaint re-layerized all of them: 10 ms a frame at 1000 cards).
+const hCache = new WeakMap<HTMLElement, { w: number; e: number; h: number }>();
+/** Bumped when anything other than the column width changes card heights (view options, font size). */
+let hEpoch = 0;
+const tileH = new Map<HTMLElement, number>();
+let lastSeq: HTMLElement[] = [];
+const keepAttached = (c: HTMLElement) => moving.has(c) || c.classList.contains("leaving") || c.classList.contains("burning") || c.classList.contains("embers");
+function heightKnown(c: HTMLElement, w: number): boolean {
+  const k = hCache.get(c);
+  return !!k && k.w === w && k.e === hEpoch;
+}
+/** Attaches the tiles near the viewport and detaches the far ones. Returns the tiles it attached. */
+function virtualize(keep?: Map<HTMLElement, unknown>): HTMLElement[] {
+  const vh = wrap.clientHeight || 800;
+  const top = wrap.scrollTop - grid.offsetTop - vh * 1.5, bottom = wrap.scrollTop - grid.offsetTop + vh * 2.5;
+  const added: HTMLElement[] = [];
+  for (const c of lastSeq) {
+    const p = posOf.get(c);
+    if (!p) continue;
+    const h = tileH.get(c) ?? 300;
+    const near = p.y + h > top && p.y < bottom;
+    if (near && c.parentElement !== grid) {
+      if (c.classList.contains("card")) c.classList.toggle("sel", selected.has(c.dataset.id!));
+      grid.append(c);
+      added.push(c);
+    } else if (!near && c.parentElement === grid && !keepAttached(c) && !keep?.has(c)) c.remove();
+  }
+  return added;
+}
+/** After scrolling: attach what came near; if a re-attached tile turns out taller or shorter than remembered
+ *  (it changed while detached), lay out again. */
+function virtualizeScroll() {
+  const added = virtualize();
+  for (const c of added) {
+    if (!c.classList.contains("card")) continue;
+    const h = c.offsetHeight;
+    if (Math.abs(h - (tileH.get(c) ?? h)) > 1) { hCache.delete(c); relayoutSoon(); break; }
+  }
+}
+
 let layoutToken = 0;
+let virtTimer: number | undefined;
 /** Move / entrance animation running on a tile. A newer layout continues it from where it is on screen instead of
  *  letting it finish at the old spot and snap. */
 const moving = new WeakMap<HTMLElement, Animation>();
@@ -630,6 +932,7 @@ function track(c: HTMLElement, a: Animation) {
   a.addEventListener("finish", () => { if (moving.get(c) === a) moving.delete(c); });
 }
 function layout(anim: Anim) {
+  if (armed && !arming) disarm(); // re-armed right after, from the new layout
   const token = ++layoutToken;
   const animate = anim !== "none" && !reduced();
   const vh = wrap.clientHeight;
@@ -645,7 +948,7 @@ function layout(anim: Anim) {
   const W = grid.clientWidth;
   layoutW = W;
   const GAP = view.gap;
-  const minCol = tab === "notes" ? Math.round(Math.max(260, view.size * 1.55)) : view.size;
+  const minCol = notesView() ? Math.round(Math.max(260, view.size * 1.55)) : view.size;
   const cols = Math.max(1, Math.floor((W + GAP) / (minCol + GAP)));
   const colW = Math.floor((W - GAP * (cols - 1)) / cols);
 
@@ -674,11 +977,21 @@ function layout(anim: Anim) {
     leave(c, animate && first.has(c), posOf.get(c) ?? null);
   }
   for (const s of seq) {
-    if (s.el.parentElement !== grid) grid.append(s.el);
+    // a tile is attached here only to be measured; virtualize() below decides what stays
+    if (s.el.parentElement !== grid && !s.label && !heightKnown(s.el, colW)) grid.append(s.el);
     if (s.el.style.width !== `${colW}px`) s.el.style.width = `${colW}px`;
   }
-  // MEASURE (one reflow), then POSITION
-  const hs = seq.map((s) => (s.label ? LABEL_H : s.el.offsetHeight));
+  // MEASURE (one reflow for the attached tiles; detached ones use their remembered height), then POSITION
+  const hs = seq.map((s) => {
+    if (s.label) return LABEL_H;
+    if (s.el.parentElement !== grid) return hCache.get(s.el)!.h;
+    const h = s.el.offsetHeight;
+    hCache.set(s.el, { w: colW, e: hEpoch, h });
+    return h;
+  });
+  tileH.clear();
+  seq.forEach((s, i) => tileH.set(s.el, hs[i]));
+  lastSeq = seq.map((s) => s.el);
   const colH = new Array(cols).fill(0);
   let forced = -1;
   dayTops = [];
@@ -694,6 +1007,10 @@ function layout(anim: Anim) {
   });
   grid.style.height = `${Math.max(0, Math.max(...colH) - GAP)}px`;
   syncDay();
+  // tiles gliding off screen stay attached until their move ends
+  virtualize(first);
+  clearTimeout(virtTimer);
+  virtTimer = window.setTimeout(virtualize, MOVE_MS + 80);
 
   // a running animation whose target did not change keeps going untouched; any other is stopped here and
   // continued below from where the tile is on screen
@@ -736,7 +1053,8 @@ function layout(anim: Anim) {
     }
   };
   // a switch waits a moment for the new pictures, so cards enter complete instead of as empty frames
-  const waiting = anim === "switch" ? entering.map((e) => e.c.querySelector("img")).filter((im): im is HTMLImageElement => !!im && !im.complete) : [];
+  const waiting = anim === "switch" ? entering.map((e) => e.c.querySelector("img")).filter((im): im is HTMLImageElement => !!im && (!!im.dataset.src || !im.complete)) : [];
+  waiting.forEach(startLoad);
   if (!waiting.length) { play(); return; }
   for (const { c } of entering) c.style.opacity = "0";
   Promise.race([Promise.all(waiting.map((im) => im.decode().catch(() => {}))), new Promise((r) => setTimeout(r, 240))]).then(play);
@@ -766,7 +1084,7 @@ function replayEnter() {
 }
 
 new IntersectionObserver((e) => {
-  if (e[0].isIntersecting && limit < shown.length && tab !== "canvases") { limit += PAGE; layout("none"); renderScrub(); }
+  if (e[0].isIntersecting && limit < shown.length && tab !== "canvases") { limit += pageSize(); layout("none"); renderScrub(); }
 }, { root: wrap, rootMargin: "800px" }).observe($("sentinel"));
 
 /** The day you are scrolled to, floating at the top of the grid. */
@@ -779,7 +1097,7 @@ function currentDay(): string {
 function syncDay() {
   const on = wrap.scrollTop > 60 && dayTops.length > 0 && tab !== "canvases";
   daypill.classList.toggle("on", on);
-  if (on) daypill.textContent = dayLabel(currentDay());
+  if (on) { const t = dayLabel(currentDay()); if (daypill.textContent !== t) daypill.textContent = t; }
   syncScrubPos();
 }
 
@@ -851,7 +1169,7 @@ function dayAtFrac(fr: number) {
 function jumpToDay(key: string) {
   const idx = shown.findIndex((it) => dayKey(it) === key);
   if (idx < 0) return;
-  if (idx >= limit - 20) { limit = Math.min(shown.length, idx + PAGE); layout("none"); }
+  if (idx >= limit - 20) { limit = Math.min(shown.length, idx + pageSize()); layout("none"); }
   const d = dayTops.find((t) => t.key === key);
   if (d) { smooth.stop(); wrap.scrollTop = d.y + grid.offsetTop - 8; }
 }
@@ -862,7 +1180,7 @@ function syncScrubPos() {
   pos.style.top = `${cur.at * 100}%`;
 }
 let dayRaf = 0;
-wrap.addEventListener("scroll", () => { if (!dayRaf) dayRaf = requestAnimationFrame(() => { dayRaf = 0; syncDay(); }); }, { passive: true });
+wrap.addEventListener("scroll", () => { if (!dayRaf) dayRaf = requestAnimationFrame(() => { dayRaf = 0; virtualizeScroll(); syncDay(); }); }, { passive: true });
 scrub.addEventListener("pointermove", (e) => {
   const r = scrub.getBoundingClientRect();
   const fr = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
@@ -917,8 +1235,11 @@ function updateSelBar() {
     create.onclick = () => createCanvas(ids());
     selbar.append(create);
     const allFav = [...selected].every((id) => byId(id)?.favorite);
+    const hid = tab === "hidden";
     selbar.append(ibtn(ICON.star, allFav ? "Remove from Favourites (F)" : "Add to Favourites (F)", () => toggleFavSel(), allFav ? "favon" : ""),
-      ibtn(ICON.tag, "Tag… (T)", () => openTagPop()), ibtn(ICON.selAll, "Select all (Ctrl+A)", selectAll),
+      ibtn(ICON.tag, "Tag… (T)", () => openTagPop()),
+      ibtn(hid ? ICON.show : ICON.hide, hid ? "Unhide (H)" : "Hide (H): only the Hidden view shows it", () => setHidden(ids(), !hid)),
+      ibtn(ICON.selAll, "Select all (Ctrl+A)", selectAll),
       ibtn(ICON.exp, "Export…", () => exportItems(ids())));
     if (!allFav) selbar.append(ibtn(ICON.trash, "Move to trash (Delete; favourites are kept)", () => trash(ids()), "danger"));
     selbar.append(clear);
@@ -1008,7 +1329,7 @@ function moveSel(key: string) {
     }
   }
   if (next < 0 || !shown[next]) return;
-  if (next >= limit) { limit = next + PAGE; layout("none"); }
+  if (next >= limit) { limit = next + pageSize(); layout("none"); }
   selected = new Set([shown[next].id]);
   anchor = next;
   refreshSel();
@@ -1050,7 +1371,9 @@ function openViewer(i: number, list: Item[] = tab === "canvases" ? cv.list : sho
   const wasOpen = viewer.classList.contains("on");
   viewIdx = i;
   const it = list[i];
+  stopMedia();
   viewer.replaceChildren();
+  zoomImg = null;
   let media: HTMLElement | null = null;
   if (isImg(it)) {
     const img = el("img");
@@ -1063,8 +1386,12 @@ function openViewer(i: number, list: Item[] = tab === "canvases" ? cv.list : sho
     if (it.w && it.h) img.style.aspectRatio = `${it.w} / ${it.h}`;
     if (!it.trashed) dragsFile(img, it.id);
     img.style.width = it.w && it.h ? `min(92vw, ${it.w}px, calc(84vh * ${it.w / it.h}))` : "";
+    img.classList.add("zm");
     viewer.append(img);
     media = img;
+    zoomImg = img;
+    zoomNat = it.w ?? 0;
+    resetZoom();
   } else if (isVideo(it)) {
     const v = el("video");
     v.src = full(it); v.controls = true; v.autoplay = true; v.loop = true;
@@ -1113,11 +1440,89 @@ function openViewer(i: number, list: Item[] = tab === "canvases" ? cv.list : sho
     }
   }
 }
+/** A hidden viewer must go quiet: pause and unload any clip or sound in it (they keep playing while display:none). */
+function stopMedia() {
+  viewer.querySelectorAll<HTMLMediaElement>("video, audio").forEach((m) => { m.pause(); m.removeAttribute("src"); m.load(); });
+}
 function closeViewer() {
+  stopMedia();
   viewer.classList.remove("on");
+  viewer.replaceChildren();
+  zoomImg = null;
   viewIdx = -1;
 }
-viewer.addEventListener("click", closeViewer);
+viewer.addEventListener("click", (e) => { if (!zoomMoved) closeViewer(); else e.stopPropagation(); zoomMoved = false; });
+
+// ---------- viewer: zoom and pan for pictures ----------
+// Wheel zooms at the pointer (up to 16x, pixels go crisp past 2x their real size), drag pans, double-click toggles
+// fit / real size, + / - / 0 on the keyboard. At fit size a click still closes and dragging still drags the file out.
+let zoomImg: HTMLImageElement | null = null, zoomNat = 0, zoomMoved = false;
+const zv = { s: 1, x: 0, y: 0 };
+const zoomPill = el("div", "vz");
+function applyZoom(animate = false) {
+  const img = zoomImg;
+  if (!img) return;
+  img.style.transition = animate && !reduced() ? "transform 220ms cubic-bezier(.2, .8, .2, 1)" : "none";
+  img.style.transform = zv.s === 1 ? "" : `translate(${zv.x}px, ${zv.y}px) scale(${zv.s})`;
+  img.draggable = zv.s === 1; // zoomed: dragging pans instead of dragging the file out
+  img.classList.toggle("zoomed", zv.s > 1);
+  const real = zoomNat && img.offsetWidth ? (zv.s * img.offsetWidth) / zoomNat : 0;
+  img.style.imageRendering = real > 2 ? "pixelated" : "";
+  zoomPill.textContent = real ? `${Math.round(real * 100)}%` : `${Math.round(zv.s * 100)}%`;
+  zoomPill.classList.toggle("on", zv.s > 1);
+  if (zv.s > 1 && !zoomPill.isConnected) viewer.append(zoomPill);
+}
+function resetZoom(animate = false) { zv.s = 1; zv.x = 0; zv.y = 0; applyZoom(animate); }
+/** Zooms to scale `s`, keeping the picture point under (cx, cy) where it is. */
+function zoomAt(s: number, cx: number, cy: number, animate = false) {
+  const img = zoomImg;
+  if (!img) return;
+  s = Math.min(16, Math.max(1, s));
+  if (s <= 1.001) { resetZoom(animate); return; }
+  // transform-origin is the centre of the untransformed box
+  const ox = img.offsetLeft + img.offsetWidth / 2, oy = img.offsetTop + img.offsetHeight / 2;
+  const ux = (cx - ox - zv.x) / zv.s, uy = (cy - oy - zv.y) / zv.s;
+  zv.x = cx - ox - s * ux; zv.y = cy - oy - s * uy; zv.s = s;
+  clampPan();
+  applyZoom(animate);
+}
+/** Keeps some of the picture on screen. */
+function clampPan() {
+  const img = zoomImg!;
+  const mx = (img.offsetWidth * zv.s) / 2, my = (img.offsetHeight * zv.s) / 2;
+  zv.x = Math.min(mx, Math.max(-mx, zv.x));
+  zv.y = Math.min(my, Math.max(-my, zv.y));
+}
+viewer.addEventListener("wheel", (e) => {
+  if (!zoomImg) return;
+  e.preventDefault();
+  const d = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+  zoomAt(zv.s * Math.exp(-d * 0.0022), e.clientX, e.clientY);
+}, { passive: false });
+viewer.addEventListener("dblclick", (e) => {
+  if (!zoomImg || e.target !== zoomImg) return;
+  e.stopPropagation();
+  const real = zoomNat && zoomImg.offsetWidth ? zoomNat / zoomImg.offsetWidth : 2.5;
+  if (zv.s > 1) resetZoom(true); else zoomAt(Math.max(2, real), e.clientX, e.clientY, true);
+});
+viewer.addEventListener("pointerdown", (e) => {
+  if (!zoomImg || zv.s === 1 || e.button !== 0 || e.target !== zoomImg) return;
+  e.preventDefault();
+  const [x0, y0, px, py] = [e.clientX, e.clientY, zv.x, zv.y];
+  zoomImg.setPointerCapture(e.pointerId);
+  zoomImg.classList.add("pan");
+  const mv = (m: PointerEvent) => {
+    if (Math.hypot(m.clientX - x0, m.clientY - y0) > 3) zoomMoved = true;
+    zv.x = px + m.clientX - x0; zv.y = py + m.clientY - y0;
+    clampPan();
+    applyZoom();
+  };
+  const img = zoomImg;
+  img.addEventListener("pointermove", mv);
+  img.addEventListener("pointerup", () => { img.removeEventListener("pointermove", mv); img.classList.remove("pan"); }, { once: true });
+});
+// a click on a zoomed picture inspects it instead of closing the viewer
+viewer.addEventListener("click", (e) => { if (zoomImg && e.target === zoomImg && zv.s > 1) { e.stopImmediatePropagation(); zoomMoved = false; } }, { capture: true });
 
 // ---------- tag chip input with autocomplete ----------
 function allTags(): [string, number][] {
@@ -1193,7 +1598,8 @@ function tagInput(tags: string[], onAdd: (t: string) => void, onRemove: (t: stri
 
 /** Re-renders an item's card in place after an edit, keeping its position. */
 function refreshItem(it: Item) {
-  for (const kind of ["card", "note", "trash"]) {
+  hayCache.delete(it); // caption / tags changed in place
+  for (const kind of ["card", "note", "trash", "hid"]) {
     const hit = cardCache.get(`${kind}:${it.id}`);
     if (!hit) continue;
     cardCache.delete(`${kind}:${it.id}`);
@@ -1232,7 +1638,7 @@ addEventListener("pointermove", (e) => {
 // The panel is click-through, so the wheel would scroll the grid under it: over the panel it scrolls the panel
 // while the panel has more to show in that direction.
 addEventListener("wheel", (e) => {
-  if (!document.body.classList.contains("detail") || e.ctrlKey) return;
+  if (!document.body.classList.contains("detail") || e.ctrlKey || viewer.classList.contains("on") || ctxMenu.classList.contains("on")) return;
   const r = detailBox.getBoundingClientRect();
   if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) return;
   const can = e.deltaY > 0 ? detail.scrollTop + detail.clientHeight < detail.scrollHeight - 1 : detail.scrollTop > 0;
@@ -1278,7 +1684,17 @@ function showDetail() {
   const tags = tagInput(it.tags,
     (t) => saveMeta(it, it.caption, [...it.tags, t]),
     (t) => saveMeta(it, it.caption, it.tags.filter((x) => x !== t)));
-  detail.append(el("label", "l", "Caption"), cap, el("label", "l", "Tags"), tags);
+  // built-in tags (what it is, where it came from): read-only, click to filter by one
+  const sys = el("div", "sys");
+  for (const s of SYS) if (s.test(it)) {
+    const b = el("button", "st", s.label);
+    b.title = `${s.hint}. Click to show only ${s.label}.`;
+    b.dataset.key = s.key;
+    b.onclick = () => toggleKey(s.key, true);
+    sys.append(b);
+  }
+  if (it.hidden) sys.append(el("span", "st hid", "Hidden"));
+  detail.append(el("label", "l", "Caption"), cap, el("label", "l", "Tags"), tags, sys);
   if (it.palette.length) {
     const pal = el("div", "pal");
     for (const col of it.palette) {
@@ -1516,10 +1932,11 @@ function cvItem(it: Item): HTMLElement {
     img.src = thumb(it);
     d.append(img);
   } else if (isVideo(it)) {
-    const v = el("video");
-    v.muted = true; v.preload = "metadata";
-    v.src = full(it) + "#t=0.1";
-    d.append(v);
+    const img = el("img");
+    img.draggable = false;
+    img.src = thumb(it);
+    img.onerror = () => { const v = el("video"); v.muted = true; v.preload = "metadata"; v.src = full(it) + "#t=0.1"; img.replaceWith(v); };
+    d.append(img);
   } else if (isNote(it) || isTextFile(it)) {
     d.classList.add("cv-note");
     d.append(el("div", "nt", it.text ?? it.caption));
@@ -1901,7 +2318,7 @@ async function backfill() {
       const r = await invoke<{ done: { id: string; palette: string[]; ocr: string | null }[]; remaining: number }>("gallery_backfill", { limit: 6 });
       for (const d of r.done) {
         const it = items.find((i) => i.id === d.id);
-        if (it) { if (d.palette.length) it.palette = d.palette; if (d.ocr) it.ocr = d.ocr; }
+        if (it) { if (d.palette.length) it.palette = d.palette; if (d.ocr) { it.ocr = d.ocr; hayCache.delete(it); } }
       }
       if (r.done.length) renderRail();
       if (!r.remaining || !r.done.length) break;
@@ -1988,6 +2405,7 @@ async function purge(ids: string[]) {
 // ---------- View menu: card size, spacing and what cards show ----------
 const viewBtn = $("viewBtn"), viewPop = $("viewpop");
 function applyView() {
+  hEpoch++;
   document.body.classList.toggle("nocap", !view.captions);
   document.body.classList.toggle("nosrc", !view.sources);
   grid.classList.toggle("square", view.square);
@@ -2384,6 +2802,184 @@ function unburn(c: HTMLElement) {
   c.querySelector(".burnfx")?.remove();
 }
 
+// ---------- adding content: files, folders ----------
+async function addFiles() {
+  const picked = await pickFolder({ multiple: true, title: "Add files to Stash" }).catch(() => null);
+  const paths = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
+  if (!paths.length) return;
+  try {
+    const n = await invoke<number>("gallery_import", { paths });
+    flash(`Added ${n} item${n === 1 ? "" : "s"}`); // library-changed brings them in
+  } catch (e) { flash(String(e)); }
+}
+interface ImportResult { added: number; skipped: number; folder: string }
+async function importFolder() {
+  const dir = await pickFolder({ directory: true, title: "Import a folder into Stash" }).catch(() => null);
+  if (typeof dir !== "string") return;
+  flash(`Importing ${dir.split(/[\\/]/).pop()}…`);
+  try {
+    const r = await invoke<ImportResult>("gallery_import_folder", { path: dir });
+    importedDone(r.added, r.folder, r.skipped);
+  } catch (e) { flash(String(e)); }
+}
+/** After a folder import: say where the items went (they stay out of All) and offer to show them. */
+function importedDone(n: number, folder: string, skipped = 0) {
+  if (!n) { flash(skipped ? `Nothing imported from ${folder} (${skipped} file${skipped === 1 ? "" : "s"} failed)` : `No pictures, clips or text files in ${folder}`); return; }
+  const where = showImported ? "" : " They stay out of All: find them under Imported or #" + folder + ".";
+  flash(`Imported ${n} item${n === 1 ? "" : "s"} from ${folder}.${where}`, {
+    label: "Show",
+    fn: async () => { await load(); Object.assign(f, NO_FILTER, { tag: folder }); if (tab !== "all") setTab("all"); renderRail(); filter("switch"); },
+  });
+}
+
+/** Files of a dropped folder (read through the drop's directory entries: dropped folders have no path here). */
+async function dirFiles(dir: FileSystemDirectoryEntry, sub: string, out: { file: File; sub: string }[], depth = 0) {
+  if (depth > 8) return;
+  const reader = dir.createReader();
+  for (;;) {
+    const batch = await new Promise<FileSystemEntry[]>((res) => reader.readEntries(res, () => res([])));
+    if (!batch.length) break;
+    for (const en of batch) {
+      if (en.name.startsWith(".")) continue;
+      if (en.isDirectory) await dirFiles(en as FileSystemDirectoryEntry, en.name, out, depth + 1);
+      else if (IMPORTABLE.test(en.name)) {
+        const file = await new Promise<File | null>((res) => (en as FileSystemFileEntry).file(res, () => res(null)));
+        if (file) out.push({ file, sub });
+      }
+    }
+  }
+}
+const IMPORTABLE = /\.(png|jpe?g|gif|webp|bmp|mp4|m4v|webm|mov|mp3|wav|ogg|oga|m4a|flac|pdf|txt|md|markdown|json|csv|tsv|log|xml|ya?ml|toml|ini|html?|css|jsx?|tsx?|rs|py|c|h|cpp|cs|java|go|sh|ps1|bat|sql|srt|vtt)$/i;
+
+async function importDroppedFolder(dir: FileSystemDirectoryEntry): Promise<number> {
+  const files: { file: File; sub: string }[] = [];
+  await dirFiles(dir, "", files);
+  let n = 0;
+  for (const { file, sub } of files) {
+    if (n % 10 === 0) flash(`Importing ${dir.name}… ${n} of ${files.length}`);
+    await invoke("gallery_import_data", new Uint8Array(await file.arrayBuffer()), {
+      headers: { "x-name": enc(file.name), "x-folder": enc(dir.name), "x-sub": enc(sub), "x-quiet": "1" },
+    });
+    n++;
+  }
+  return n;
+}
+
+// ---------- right-click menu ----------
+const ctxMenu = el("div");
+ctxMenu.id = "ctx";
+document.body.append(ctxMenu);
+interface MenuItem { label: string; icon?: string; fn?: () => void; danger?: boolean; hint?: string; off?: boolean }
+type MenuEntry = MenuItem | "-" | { head: string };
+function openMenu(x: number, y: number, entries: MenuEntry[]) {
+  ctxMenu.replaceChildren();
+  for (const e of entries) {
+    if (e === "-") { ctxMenu.append(el("hr")); continue; }
+    if ("head" in e) { ctxMenu.append(el("div", "mh", e.head)); continue; }
+    const b = el("button", e.danger ? "d" : "");
+    const i = el("span", "mi");
+    if (e.icon) i.innerHTML = e.icon; // static markup
+    b.append(i, el("span", "ml", e.label));
+    if (e.hint) b.append(el("kbd", "", e.hint));
+    b.disabled = !!e.off;
+    b.onclick = () => { closeMenu(); e.fn?.(); };
+    ctxMenu.append(b);
+  }
+  // drop the trailing / doubled separators left by optional items
+  for (const hr of Array.from(ctxMenu.querySelectorAll("hr"))) if (!hr.nextElementSibling || hr.nextElementSibling.tagName === "HR" || !hr.previousElementSibling) hr.remove();
+  ctxMenu.classList.add("on");
+  const r = ctxMenu.getBoundingClientRect();
+  ctxMenu.style.left = `${Math.max(6, Math.min(x, innerWidth - r.width - 6))}px`;
+  ctxMenu.style.top = `${Math.max(6, Math.min(innerHeight - r.height - 6, y + r.height > innerHeight - 6 ? y - r.height : y))}px`;
+  ctxMenu.style.transformOrigin = `${x > innerWidth - r.width - 6 ? "right" : "left"} ${y + r.height > innerHeight - 6 ? "bottom" : "top"}`;
+}
+function closeMenu() { ctxMenu.classList.remove("on"); }
+document.addEventListener("pointerdown", (e) => { if (!(e.target as HTMLElement).closest("#ctx")) closeMenu(); }, true);
+addEventListener("blur", closeMenu);
+wrap.addEventListener("scroll", closeMenu, { passive: true });
+
+/** Menu for one or more items (the selection, when the clicked item is part of it). */
+function itemMenu(ids: string[]): MenuEntry[] {
+  const list = ids.map((id) => byId(id)).filter((i): i is Item => !!i);
+  if (!list.length) return [];
+  const one = list.length === 1 ? list[0] : null;
+  const n = list.length;
+  const s = n === 1 ? "" : ` ${n} items`;
+  if (tab === "trash") return [
+    { label: `Restore${s}`, icon: ICON.restore, fn: () => restore(ids) },
+    "-",
+    { label: `Delete${s} forever`, icon: ICON.trash, fn: () => purge(ids), danger: true },
+  ];
+  const allFav = list.every((i) => i.favorite);
+  const hid = tab === "hidden";
+  return [
+    ...(one ? [{ label: "Open", icon: ICON.view, hint: "Space", fn: () => openViewer(shown.findIndex((i) => i.id === one.id)) }] : []),
+    ...(one && canCopy(one) ? [{ label: "Copy", icon: ICON.copy, fn: () => copyItem(one) }] : []),
+    ...(one?.url ? [{ label: "Open source page", icon: ICON.open, fn: () => invoke("gallery_open_url", { url: one.url }) }] : []),
+    ...(one ? [{ label: "Show in folder", icon: ICON.reveal, fn: () => invoke("gallery_reveal", { id: one.id }) }] : []),
+    "-",
+    { label: allFav ? `Remove${s} from Favourites` : `Add${s} to Favourites`, icon: ICON.star, hint: "F", fn: () => setFav(ids, !allFav) },
+    { label: `Tag${s}…`, icon: ICON.tag, hint: "T", fn: () => { selected = new Set(ids); refreshSel(); openTagPop(); } },
+    { label: hid ? `Unhide${s}` : `Hide${s}`, icon: hid ? ICON.show : ICON.hide, hint: "H", fn: () => setHidden(ids, !hid), off: hid && list.every((i) => !i.hidden) },
+    { label: n === 1 ? "New canvas with it" : `New canvas with these ${n}`, icon: ICON.canvas, fn: () => createCanvas(ids) },
+    { label: `Export${s}…`, icon: ICON.exp, fn: () => exportItems(ids) },
+    "-",
+    allFav ? { label: "Favourites can't be trashed", icon: ICON.trash, off: true } : { label: `Move${s} to trash`, icon: ICON.trash, hint: "Del", fn: () => trash(ids), danger: true },
+  ];
+}
+/** Menu for a tag (or any filter key): show it, pin it, hide it. */
+function keyMenu(k: string): MenuEntry[] {
+  const lab = keyLabel(k);
+  return [
+    { head: lab },
+    { label: keyActive(k) ? `Stop filtering by ${lab}` : `Show only ${lab}`, icon: ICON.view, fn: () => toggleKey(k) },
+    { label: isFavTag(k) ? "Unpin from Favourite tags" : "Pin to Favourite tags", icon: ICON.star, fn: () => toggleFavTag(k) },
+    { label: isHiddenKey(k) ? `Unhide ${lab}` : `Hide everything with ${lab}`, icon: isHiddenKey(k) ? ICON.show : ICON.hide, fn: () => setHiddenTag(k, !isHiddenKey(k)) },
+    ...(!k.includes(":") ? [{ label: `Select all ${lab}`, icon: ICON.selAll, fn: () => { selected = new Set(shown.filter((i) => hasTag(i, k)).map((i) => i.id)); refreshSel(); } }] : []),
+  ];
+}
+/** Menu for empty space: add things, and window-wide actions. */
+function spaceMenu(): MenuEntry[] {
+  return [
+    { label: "Add files…", icon: ICON.upload, fn: addFiles },
+    { label: "Import folder…", icon: ICON.folder, fn: importFolder, hint: "" },
+    { label: "Paste", icon: ICON.paste, hint: "Ctrl+V", fn: () => invoke<string>("gallery_paste").then(flash).catch((e) => flash(String(e))) },
+    "-",
+    ...(itemTab() || tab === "trash" ? [{ label: "Select all", icon: ICON.selAll, hint: "Ctrl+A", fn: () => { selected = new Set(shown.map((i) => i.id)); refreshSel(); } }] : []),
+    ...(Object.entries(f).some(([k, v]) => v !== (NO_FILTER as Record<string, string>)[k]) || q.value ? [{ label: "Clear filters", icon: ICON.close, fn: () => { Object.assign(f, NO_FILTER); q.value = ""; renderRail(); filter("switch"); } }] : []),
+    { label: "View options…", icon: ICON.view, fn: () => { viewPop.classList.add("on"); buildViewPop(); } },
+    { label: "Export what is shown…", icon: ICON.exp, fn: () => exportItems(shown.map((i) => i.id)), off: !shown.length || !itemTab() },
+    "-",
+    { label: "Open library folder", icon: ICON.reveal, fn: () => invoke("gallery_open_path", { path: libraryPath }).catch((e) => flash(String(e))), off: !libraryPath },
+    { label: "Reload", icon: ICON.refresh, fn: () => { load(true); if (tab === "trash") loadTrash(true); } },
+  ];
+}
+addEventListener("contextmenu", (e) => {
+  const t = e.target as HTMLElement;
+  if (t.closest("input, textarea, [contenteditable]")) return; // keep the text menu (cut / copy / paste)
+  e.preventDefault();
+  if (viewer.classList.contains("on")) {
+    const it = viewList[viewIdx];
+    if (it && !it.trashed) openMenu(e.clientX, e.clientY, [
+      ...(canCopy(it) ? [{ label: "Copy", icon: ICON.copy, fn: () => copyItem(it) }] : []),
+      { label: "Show in folder", icon: ICON.reveal, fn: () => invoke("gallery_reveal", { id: it.id }) },
+      ...(zoomImg ? ["-" as const, { label: "Zoom to real size", icon: ICON.view, fn: () => { const r = zoomImg!.getBoundingClientRect(); zoomAt(zoomNat ? zoomNat / zoomImg!.offsetWidth : 2, r.left + r.width / 2, r.top + r.height / 2, true); } }, { label: "Fit to window", icon: ICON.view, hint: "0", fn: () => resetZoom(true) }] : []),
+    ]);
+    return;
+  }
+  const keyEl = t.closest<HTMLElement>("[data-key]");
+  if (keyEl && tab !== "trash") { openMenu(e.clientX, e.clientY, keyMenu(keyEl.dataset.key!)); return; }
+  const c = t.closest<HTMLElement>("#grid .card");
+  if (c?.dataset.id) {
+    const id = c.dataset.id;
+    if (!selected.has(id)) { selected = new Set([id]); anchor = shown.findIndex((i) => i.id === id); refreshSel(); }
+    openMenu(e.clientX, e.clientY, itemMenu([...selected]));
+    return;
+  }
+  if (t.closest("#canvas, #cvhome, #detail, #selbar, #tagpop, #viewpop")) return;
+  openMenu(e.clientX, e.clientY, spaceMenu());
+});
+
 // ---------- events ----------
 q.addEventListener("input", () => { if (tab === "canvases") setTab("all"); filter("none"); paintSugg(); }); // typing stays instant
 
@@ -2398,6 +2994,7 @@ function paintSugg() {
   if (word && document.activeElement === q) {
     for (const [t, n] of allTags()) if (t.toLowerCase().includes(word)) qsList.push({ label: "#" + t, token: "#" + t, n, kind: isFavTag(t) ? "★ Tag" : "Tag", pick: () => (f.tag = t) });
     qsList = qsList.slice(0, 6);
+    for (const s of SYS) if (lc(s.label).startsWith(word)) qsList.push({ label: s.label, token: "#" + lc(s.label), n: pool().filter(s.test).length, kind: "Kind", pick: () => setKeyFilter(s.key, true) });
     for (const [name, hex] of BUCKETS) if (name.startsWith(word)) qsList.push({ label: name, token: "color:" + name, n: items.filter((i) => hasColor(i, name)).length, kind: "Colour", swatch: hex, pick: () => (f.color = name) });
     const apps = new Map<string, number>();
     for (const it of items) if (it.process) apps.set(it.process, (apps.get(it.process) ?? 0) + 1);
@@ -2436,8 +3033,13 @@ q.addEventListener("focus", paintSugg);
 
 window.addEventListener("keydown", (e) => {
   const inField = (e.target as HTMLElement).tagName === "INPUT";
+  if (ctxMenu.classList.contains("on")) { if (e.key === "Escape") { e.preventDefault(); closeMenu(); return; } closeMenu(); }
   if (viewer.classList.contains("on")) {
-    if (e.key === "Escape") closeViewer();
+    const mid = () => { const r = zoomImg!.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2] as const; };
+    if (e.key === "Escape") { if (zoomImg && zv.s > 1) resetZoom(true); else closeViewer(); }
+    else if (zoomImg && (e.key === "+" || e.key === "=")) { e.preventDefault(); zoomAt(zv.s * 1.5, ...mid(), true); }
+    else if (zoomImg && e.key === "-") { e.preventDefault(); zoomAt(zv.s / 1.5, ...mid(), true); }
+    else if (zoomImg && e.key === "0") { e.preventDefault(); resetZoom(true); }
     else if (e.key === "ArrowRight" || e.key === " " || e.key === "Enter") { e.preventDefault(); stepViewer(1); }
     else if (e.key === "ArrowLeft") stepViewer(-1);
     return;
@@ -2447,6 +3049,7 @@ window.addEventListener("keydown", (e) => {
   else if (e.key === "/" && !inField) { e.preventDefault(); q.focus(); }
   else if (!inField && itemTab() && e.key.toLowerCase() === "f" && !e.ctrlKey && selected.size) { e.preventDefault(); toggleFavSel(); }
   else if (!inField && itemTab() && e.key.toLowerCase() === "t" && !e.ctrlKey && selected.size) { e.preventDefault(); openTagPop(); }
+  else if (!inField && itemTab() && e.key.toLowerCase() === "h" && !e.ctrlKey && selected.size) { e.preventDefault(); setHidden([...selected], tab !== "hidden"); }
   else if (e.key === "Escape") {
     if (inField) (e.target as HTMLElement).blur();
     else if (pop.classList.contains("on")) pop.classList.remove("on");
@@ -2474,6 +3077,20 @@ window.addEventListener("drop", async (e) => {
   const dt = e.dataTransfer;
   if (dragging || !dt) return;
   let n = 0;
+  // folders: read their entries now (the drop's data is gone after the first await)
+  const entries = Array.from(dt.items ?? []).filter((i) => i.kind === "file").map((i) => i.webkitGetAsEntry?.() ?? null);
+  if (entries.some((en) => en?.isDirectory)) {
+    const loose = Array.from(dt.files).filter((fl) => !entries.some((en) => en?.isDirectory && en.name === fl.name));
+    try {
+      for (const en of entries) if (en?.isDirectory) {
+        const k = await importDroppedFolder(en as FileSystemDirectoryEntry);
+        await invoke("gallery_changed");
+        importedDone(k, en.name);
+      }
+      for (const fl of loose) await invoke("gallery_import_data", new Uint8Array(await fl.arrayBuffer()), { headers: { "x-name": encodeURIComponent(fl.name || "dropped") } });
+    } catch (err) { flash(String(err)); await invoke("gallery_changed").catch(() => {}); }
+    return;
+  }
   try {
     if (dt.files.length) {
       for (const fl of Array.from(dt.files)) {
@@ -2503,28 +3120,151 @@ window.addEventListener("keydown", async (e) => {
 });
 
 // New captures, tags from the tag radial, imports: Rust emits library-changed and they slide into place.
+listen("theme-changed", () => { hEpoch++; setTimeout(() => relayoutSoon(), 120); });
 listen("library-changed", () => load(true).then(() => { if (tab === "canvases" && cv.doc) buildCanvas(true); }).catch(() => {}));
 
 // Opening: the window is created hidden and the page stays invisible (body.pre) while the first layout runs;
 // the window is then shown and the entrance (body.opening + the card cascade) plays on the first visible frame.
 document.body.classList.add("pre");
 invoke<string[]>("gallery_fav_tags").then((t) => { favTags = t; renderRail(); }).catch(() => {});
-invoke<{ config: { trash_days?: number } }>("settings_get").then((d) => { trashDays = d.config.trash_days ?? 30; renderTrashBar(); }).catch(() => {});
-Promise.all([document.fonts?.ready.catch(() => {}), loadCanvases(), tab === "trash" ? invoke<Item[]>("gallery_trash_list").then((t) => { trashItems = t; }).catch(() => {}) : null])
-  .then(() => load())
+const prefsReady = Promise.all([
+  invoke<string[]>("gallery_hidden_tags").then((t) => { hiddenTags = t; }).catch(() => {}),
+  invoke<{ config: { trash_days?: number; show_imported?: boolean; library_path?: string } }>("settings_get")
+    .then((d) => { trashDays = d.config.trash_days ?? 30; showImported = !!d.config.show_imported; libraryPath = d.config.library_path ?? ""; }).catch(() => {}),
+]);
+// Settings > Show imported items can change while the gallery is open
+addEventListener("focus", () => {
+  invoke<{ config: { show_imported?: boolean } }>("settings_get").then((d) => {
+    if (!!d.config.show_imported !== showImported) { showImported = !!d.config.show_imported; renderRail(); filter("flip"); }
+  }).catch(() => {});
+});
+// Kept ready (?warm=1, Settings > Keep gallery ready): the page loads while the window is hidden and waits for
+// "gallery-show"; closing hides the window, and the page then reloads itself hidden for the next open.
+const warm = new URLSearchParams(location.search).has("warm");
+let revealed = false, openTimer: number | undefined;
+function reveal() {
+  if (revealed) return;
+  revealed = true;
+  mark("laidout");
+  invoke("window_ready").catch(() => {});
+  q.focus();
+  requestAnimationFrame(entrance);
+}
+function entrance() {
+  mark("visible");
+  recordFrames("gallery", 1800);
+  if (armed) {
+    // prepared while hidden: resume the paused animations (no style or layout work). The first frames after the
+    // window appears are slow (the GPU re-uploads the page), so they are spent on the still-transparent start
+    // pose and the motion begins once frames flow.
+    armed = false;
+    let n = 0;
+    const go = () => {
+      if (++n < 3) { requestAnimationFrame(go); return; }
+      opening = false;
+      for (const a of document.getAnimations()) a.play();
+      enterUntil = performance.now() + 1400;
+    };
+    requestAnimationFrame(go);
+  } else {
+    document.body.classList.remove("pre");
+    document.body.classList.add("opening");
+    opening = false;
+    if (tab !== "canvases") replayEnter();
+  }
+  clearTimeout(openTimer);
+  // dropping the opening class restyles the page: do it when idle, after every entrance animation has ended
+  openTimer = window.setTimeout(() => requestIdleCallback(() => {
+    document.body.classList.remove("opening");
+    document.querySelectorAll<HTMLElement>("#rail > *").forEach((e) => e.style.removeProperty("--i"));
+  }, { timeout: 1000 }), 1500);
+}
+/** Ready page: the entrance (opening classes + card cascade) is set up while hidden and paused at its first
+ *  frame, so showing the window costs nothing but resuming it. Any layout meanwhile disarms and re-arms it. */
+let armed = false, arming = false, rearmTimer: number | undefined;
+function arm() {
+  if (!warm || revealed || armed || tab === "canvases") return;
+  arming = true;
+  document.body.classList.remove("pre");
+  document.body.classList.add("opening");
+  replayEnter();
+  void document.body.offsetHeight; // style now, so the CSS opening animations exist and can be paused
+  // transitions (the tab indicator settling) finish now; the opening animations wait at their first frame
+  for (const a of document.getAnimations()) {
+    if (a instanceof CSSTransition) a.finish();
+    else { a.pause(); a.currentTime = 0; }
+  }
+  arming = false;
+  armed = true;
+}
+function disarm() {
+  if (!armed || arming) return;
+  armed = false;
+  for (const c of liveTiles()) { moving.get(c)?.cancel(); moving.delete(c); c.style.opacity = ""; }
+  document.body.classList.remove("opening");
+  document.body.classList.add("pre");
+  clearTimeout(rearmTimer);
+  rearmTimer = window.setTimeout(arm, 0);
+}
+let booted = false, painting: Promise<void> | null = null;
+/** Once per WebView: paint the page off-screen (see gallery_warm_paint in Rust) so the first real open does not
+ *  pay for the WebView's first frames. */
+async function warmPaint() {
+  try { if (sessionStorage.getItem("stash.painted")) return; sessionStorage.setItem("stash.painted", "1"); } catch { return; }
+  await invoke("gallery_warm_paint", { on: true }).catch(() => {});
+  document.body.classList.remove("pre");
+  await Promise.race([preDecode(), new Promise((r) => setTimeout(r, 600))]);
+  await new Promise<void>((r) => { let n = 0; const t = setTimeout(r, 400); const f = () => (++n >= 8 ? (clearTimeout(t), r()) : requestAnimationFrame(f)); requestAnimationFrame(f); });
+  document.body.classList.add("pre");
+  await new Promise<void>((r) => { const t = setTimeout(r, 60); requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(t); r(); })); });
+  await invoke("gallery_warm_paint", { on: false }).catch(() => {});
+}
+async function showWarm() {
+  if (revealed || !booted) return; // a page still booting asks gallery_warm_ready when it is done
+  if (painting) await painting;
+  // the library folder changed while hidden: start over (the reloaded page shows itself when ready)
+  const lib = await invoke<{ config: { library_path?: string; show_imported?: boolean } }>("settings_get").then((d) => d.config).catch(() => null);
+  if (lib && (lib.library_path ?? "") !== libraryPath) { location.reload(); return; }
+  if (lib) showImported = !!lib.show_imported;
+  // captures and edits made while hidden already arrived through library-changed; files changed by other tools
+  // are picked up by a rescan once the entrance is over (usually it answers "unchanged")
+  reveal();
+  setTimeout(() => load(true).catch(() => {}), 1600);
+}
+listen("gallery-show", () => { showWarm(); });
+listen("gallery-hide", async () => {
+  // blank the page before the window hides, so the next show starts from an empty frame, not this one
+  clearTimeout(openTimer);
+  document.body.classList.remove("opening");
+  document.body.classList.add("pre");
+  stopMedia();
+  await new Promise<void>((r) => { let n = 0; const t = setTimeout(r, 120); const f = () => (++n >= 2 ? (clearTimeout(t), r()) : requestAnimationFrame(f)); requestAnimationFrame(f); });
+  const hidden = await invoke<boolean>("gallery_hide_ready").catch(() => true);
+  if (hidden) location.replace(location.pathname + "?warm=1"); // a fresh page, loaded while hidden
+  else {
+    // reopened while closing: make sure the window is shown (the close fallback may have hidden it) and that
+    // Rust's pending show is consumed, then play the entrance
+    invoke("window_ready").catch(() => {});
+    requestAnimationFrame(entrance);
+  }
+});
+/** Decodes the pictures the entrance will show, while the window is still hidden. */
+function preDecode() {
+  const imgs = Array.from(grid.querySelectorAll<HTMLImageElement>(".card img[src]")).slice(0, 48);
+  return Promise.all(imgs.map((im) => im.decode().catch(() => {})));
+}
+Promise.all([document.fonts?.ready.catch(() => {}), prefsReady, loadCanvases(), tab === "trash" ? invoke<Item[]>("gallery_trash_list").then((t) => { trashItems = t; }).catch(() => {}) : null])
+  .then(() => { mark("prefs"); return load(); })
   .then(() => { if (tab !== "all" || !items.length) setTab(tab, "none"); })
   .catch((e) => console.error(e))
-  .finally(() => {
-    invoke("window_ready").catch(() => {});
-    q.focus();
-    requestAnimationFrame(() => {
-      document.body.classList.remove("pre");
-      document.body.classList.add("opening");
-      opening = false;
-      if (tab !== "canvases") replayEnter();
-      setTimeout(() => {
-        document.body.classList.remove("opening");
-        document.querySelectorAll<HTMLElement>("#rail > *").forEach((e) => e.style.removeProperty("--i"));
-      }, 1500);
-    });
+  .finally(async () => {
+    if (!warm) { booted = true; reveal(); return; }
+    booted = true;
+    if (await invoke<boolean>("gallery_warm_ready").catch(() => false)) { showWarm(); return; }
+    painting = warmPaint();
+    await painting;
+    painting = null;
+    if (revealed) return;
+    preDecode();
+    arm();
   });
