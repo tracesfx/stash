@@ -191,6 +191,58 @@ pub fn monitor_rect_at(x: i32, y: i32) -> RECT {
     }
 }
 
+/// Call on a fresh UI thread right before it shows its first window under the pointer. A thread that has not
+/// handled any message yet has no cursor of its own, and Windows shows the "app starting" busy arrow over its
+/// window until it answers WM_SETCURSOR. Setting the cursor and draining the queue once avoids that blip.
+pub fn prime_cursor(cursor: windows::core::PCWSTR) {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    unsafe {
+        if let Ok(c) = LoadCursorW(None, cursor) {
+            SetCursor(Some(c));
+        }
+        let mut msg = MSG::default();
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+/// Cloaks / uncloaks a window (DWM keeps composing it but does not show it).
+pub fn cloak(hwnd: isize, on: bool) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+    let v: windows::core::BOOL = on.into();
+    unsafe {
+        let _ = DwmSetWindowAttribute(windows::Win32::Foundation::HWND(hwnd as *mut c_void), DWMWA_CLOAK, &v as *const _ as *const c_void, 4);
+    }
+}
+
+/// Uncloaks `hwnd` once DWM has composed a few frames of it. A web window's first composed frame after showing is
+/// a flat light-grey client area (before WebView2 and the glass backdrop have content), seen as a white flash;
+/// showing it cloaked and revealing it a few vblanks later skips that frame.
+pub fn uncloak_after_frames(hwnd: isize, frames: u32) {
+    std::thread::spawn(move || {
+        for _ in 0..frames {
+            unsafe {
+                if windows::Win32::Graphics::Dwm::DwmFlush().is_err() {
+                    std::thread::sleep(std::time::Duration::from_millis(8));
+                }
+            }
+        }
+        cloak(hwnd, false);
+    });
+}
+
+/// Work area (screen minus taskbar) of the monitor containing the point, in physical pixels.
+pub fn work_rect_at(x: i32, y: i32) -> RECT {
+    unsafe {
+        let mon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let _ = GetMonitorInfoW(mon, &mut info);
+        info.rcWork
+    }
+}
+
 /// Work area (screen minus taskbar) of the primary monitor, in physical pixels, and its DPI scale.
 pub fn primary_work_area() -> (RECT, f32) {
     unsafe {

@@ -261,7 +261,7 @@ pub fn save_file(root: &Path, src: &Path, method: &str, source: &SourceInfo) -> 
 /// folder (system files, archives, project files) is skipped.
 pub fn importable(ext: &str) -> bool {
     let e = ext.to_ascii_lowercase();
-    matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "mp4" | "m4v" | "webm" | "mov" | "mp3" | "wav" | "ogg" | "oga" | "m4a" | "flac" | "pdf")
+    matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "mp4" | "m4v" | "webm" | "mov" | "mp3" | "wav" | "ogg" | "oga" | "m4a" | "flac" | "aac" | "opus" | "weba" | "pdf")
         || crate::gallery::is_text_ext(&e)
 }
 
@@ -348,6 +348,34 @@ pub fn update_sidecar(sidecar: &Path, f: impl FnOnce(&mut Value)) -> Result<()> 
     f(&mut v);
     v["modified"] = Value::String(Local::now().to_rfc3339_opts(SecondsFormat::Millis, true));
     write_atomic(sidecar, serde_json::to_string_pretty(&v)?.as_bytes())
+}
+
+/// Rewrites a text note (or a link) after it was edited in the gallery: content first, then the sidecar
+/// (size, hash, character count). A link must stay a single web address.
+pub fn set_text(sidecar: &Path, content: &Path, text: &str) -> Result<()> {
+    let v = read_json(sidecar)?;
+    let kind = v["type"].as_str().unwrap_or("");
+    let text = text.trim();
+    let body = match kind {
+        "text" => text.to_string(),
+        "link" if is_url(text) => format!("[InternetShortcut]\r\nURL={text}\r\n"),
+        "link" => anyhow::bail!("A link must stay a single web address"),
+        _ => anyhow::bail!("only notes and links can be edited"),
+    };
+    if text.is_empty() {
+        anyhow::bail!("A note can't be empty (delete it instead)");
+    }
+    write_atomic(content, body.as_bytes())?;
+    let bytes = std::fs::metadata(content)?.len();
+    let hash = sha256_file(content)?;
+    let chars = text.chars().count();
+    update_sidecar(sidecar, |v| {
+        v["file"]["bytes"] = json!(bytes);
+        v["file"]["sha256"] = Value::String(hash);
+        v["text"]["chars"] = json!(chars);
+    })?;
+    notify_changed();
+    Ok(())
 }
 
 /// Sets the caption in an existing sidecar, preserving all other (even unknown) fields.

@@ -41,13 +41,36 @@ pub struct Config {
     pub show_imported: bool,
     /// Keep the gallery loaded (hidden) after it closes, so it opens instantly. Costs memory while hidden.
     pub keep_gallery_ready: bool,
+    /// Size of the gallery and settings windows and everything in them: auto | small | medium | large.
+    /// Auto picks from the primary monitor (1080p-class screens get small, 1440p medium, bigger ones large).
+    pub ui_scale: String,
+    /// A short burst of sparkles next to the "Saved" toast.
+    pub save_fx: bool,
+    /// The first-run tutorial was shown (or skipped). Missing in older configs = true (only new installs get it).
+    pub tutorial_done: bool,
+    /// Saved looks (Settings > Appearance > Themes).
+    pub themes: Vec<SavedTheme>,
     /// Look revision. Missing in configs written before M6 (reads as 0), which then get the new glass defaults.
     #[serde(default)]
     pub style_rev: u32,
 }
 
+/// A named snapshot of the whole look (every Appearance knob except the toast corner, plus the glass colours).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SavedTheme {
+    pub name: String,
+    pub appearance: Appearance,
+    pub glass: Vec<String>,
+}
+
+pub const UI_SCALES: [&str; 4] = ["auto", "small", "medium", "large"];
+
 /// Current look revision (M6: neutral Liquid Glass only; 4: menu animation picker).
 pub const STYLE_REV: u32 = 4;
+
+/// Highest selectable animation frame-rate cap.
+pub const MAX_FPS: u16 = 540;
 
 /// Opening animations of the wheel and the tag menu (Appearance > Menu animation).
 pub const MENU_ANIMS: [&str; 6] = ["petals", "fade", "zoom", "bounce", "swirl", "fan"];
@@ -95,7 +118,7 @@ pub struct Appearance {
     pub menu_anim: String,
     /// Length of that opening animation (ms), 100..600.
     pub menu_anim_ms: u16,
-    /// Animation frame-rate cap: 0 = the display refresh rate, else 15..=240 fps.
+    /// Animation frame-rate cap: 0 = the display refresh rate, else 15..=MAX_FPS fps.
     pub anim_fps: u16,
     /// Legacy (style_rev < 4) Slice pop-in switch; read once by `Config::migrate`, never written.
     #[serde(skip_serializing)]
@@ -108,27 +131,27 @@ pub struct Appearance {
 impl Default for Appearance {
     fn default() -> Self {
         Self {
-            glass_translucency: 70,
-            glass_blur: 30,
-            glass_saturation: 150,
-            win_translucency: 70,
-            win_blur: 30,
-            win_saturation: 150,
-            glass_tint: 20,
-            hover_color: String::new(),
+            glass_translucency: 0,
+            glass_blur: 4,
+            glass_saturation: 180,
+            win_translucency: 81,
+            win_blur: 49,
+            win_saturation: 230,
+            glass_tint: 26,
+            hover_color: "#4f4f4f".into(),
             wheel_size: 100,
             wheel_hole: 40,
-            wheel_gap: 5,
+            wheel_gap: 7,
             wheel_opacity: 100,
-            ui_font: 13,
+            ui_font: 12,
             ui_radius: 12,
             popup_corner: "br".into(),
             animations: true,
             cursor_glow_on: true,
-            cursor_glow: 30,
-            cursor_glow_lag: 90,
+            cursor_glow: 25,
+            cursor_glow_lag: 260,
             menu_anim: "petals".into(),
-            menu_anim_ms: 260,
+            menu_anim_ms: 550,
             anim_fps: 0,
             slice_pop: true,
             glass_clear: false,
@@ -155,7 +178,7 @@ impl Appearance {
         self.cursor_glow_lag = self.cursor_glow_lag.min(400);
         self.menu_anim_ms = self.menu_anim_ms.clamp(100, 600);
         if self.anim_fps != 0 {
-            self.anim_fps = self.anim_fps.clamp(15, 240);
+            self.anim_fps = self.anim_fps.clamp(15, MAX_FPS);
         }
         if !MENU_ANIMS.contains(&self.menu_anim.as_str()) {
             self.menu_anim = "petals".into();
@@ -174,14 +197,14 @@ impl Default for Config {
         let home = std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default();
         Self {
             library_path: home.join("Pictures").join("Stash"),
-            hotkey: "Ctrl+Alt+S".into(),
-            hold_ms: 200,
+            hotkey: "Ctrl+Space".into(),
+            hold_ms: 110,
             capture_url: true,
             tag_menu: true,
             autostart: true,
             ocr: true,
             appearance: Appearance::default(),
-            rec_system_audio: false,
+            rec_system_audio: true,
             rec_mic: false,
             rec_fps: 30,
             rec_max_secs: 300,
@@ -190,6 +213,11 @@ impl Default for Config {
             trash_days: 30,
             show_imported: false,
             keep_gallery_ready: true,
+            ui_scale: "auto".into(),
+            save_fx: true,
+            // serde fills missing fields from here: configs from before the tutorial count as done
+            tutorial_done: true,
+            themes: Vec::new(),
             glass: crate::theme::DEFAULT_GLASS.iter().map(|s| s.to_string()).collect(),
             style_rev: STYLE_REV,
         }
@@ -219,7 +247,7 @@ impl Config {
                 c
             }
             Err(_) => {
-                let c = Config::default();
+                let c = Config { tutorial_done: false, ..Config::default() };
                 c.save()?;
                 c
             }
@@ -259,6 +287,10 @@ impl Config {
             let a = &mut self.appearance;
             a.menu_anim = if a.slice_pop { "petals" } else { "fade" }.into();
             self.style_rev = STYLE_REV;
+            changed = true;
+        }
+        if !UI_SCALES.contains(&self.ui_scale.as_str()) {
+            self.ui_scale = "auto".into();
             changed = true;
         }
         let before = self.wheel_actions.len();

@@ -49,7 +49,7 @@ pub const ALL_ACTIONS: [Action; 10] = [
 
 /// Default wheel: the five core actions.
 pub fn default_ids() -> Vec<String> {
-    ["snip", "note", "record", "gallery", "settings"].iter().map(|s| s.to_string()).collect()
+    ["snip", "selection", "clipboard", "note", "record", "gallery", "settings"].iter().map(|s| s.to_string()).collect()
 }
 
 /// Enabled actions (by config id) in canonical wheel order. Never empty: falls back to the defaults.
@@ -226,6 +226,7 @@ pub fn run(cursor: POINT, scale: f32, release: Arc<AtomicBool>, style: Style, fr
         .ok()?;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *st as *mut State as isize);
         present(hwnd, &mut st); // first (transparent) frame before showing: no flash
+        crate::winutil::prime_cursor(IDC_ARROW);
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         tracing::info!("wheel visible {} ms after start", t_run.elapsed().as_millis());
         let pacer = gfx::FramePacer::start(hwnd, TIMER);

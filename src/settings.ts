@@ -17,9 +17,10 @@ interface Config {
   library_path: string; hotkey: string; hold_ms: number; capture_url: boolean; tag_menu: boolean;
   autostart: boolean; glass: string[]; ocr: boolean; appearance: Appearance; rec_system_audio: boolean; rec_mic: boolean;
   rec_fps: number; rec_max_secs: number; wheel_actions: string[]; style_rev: number; settings_autoclose: boolean; trash_days: number;
-  show_imported: boolean; keep_gallery_ready: boolean;
+  show_imported: boolean; keep_gallery_ready: boolean; ui_scale: string; save_fx: boolean; tutorial_done: boolean; themes: SavedTheme[];
 }
-interface Dto { config: Config; autostart_supported: boolean; }
+interface SavedTheme { name: string; appearance: Appearance; glass: string[] }
+interface Dto { config: Config; autostart_supported: boolean; auto_scale: string; default_appearance: Appearance; default_glass: string[] }
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls = "", text = ""): HTMLElementTagNameMap[K] {
@@ -33,6 +34,8 @@ let draft: Config;
 let opened = false; // entrance finished (click-outside-to-close is armed after it)
 let saved: Config; // last config the app accepted
 let autostartSupported = true;
+let autoScale = "medium";
+let defaults: SavedTheme = { name: "Default", appearance: {} as Appearance, glass: [] };
 
 // ---------- autosave ----------
 let cTimer: number | undefined;
@@ -41,6 +44,7 @@ let pending = false;
 function commit(now = false) {
   pending = true;
   refreshPreview();
+  paintThemes();
   clearTimeout(cTimer);
   cTimer = window.setTimeout(flush, now ? 0 : 220);
 }
@@ -90,6 +94,17 @@ function row(label: string, hint: string, control: HTMLElement, o: RowOpts = {})
 
 /** Marks a row as advanced: hidden while the footer's Advanced switch is off. */
 function adv<T extends HTMLElement>(r: T): T { r.classList.add("adv"); return r; }
+
+/** A small segmented control (one of a few named choices). */
+function choice(opts: [string, string][], value: string, onPick: (v: string) => void): HTMLElement {
+  const s = el("div", "seg mini");
+  for (const [v, label] of opts) {
+    const b = el("button", v === value ? "on" : "", label);
+    b.onclick = () => { s.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b)); onPick(v); commit(true); };
+    s.append(b);
+  }
+  return s;
+}
 
 function group(title: string, ...rows: HTMLElement[]): HTMLElement[] {
   const g = el("div", "group");
@@ -284,6 +299,7 @@ function buildCapture() {
       row("Capture shortcut", "Tap to snip a region. Hold for the radial wheel. Needs a modifier (Ctrl, Alt, Shift or Win).", ctl),
       adv(hold.row)),
     ...group("After a capture", tagRow,
+      row("Save sparkle", "A tiny burst of sparkles next to the Saved toast. Needs Animations (Appearance).", toggle(draft.save_fx !== false, (v) => (draft.save_fx = v))),
       adv(row("Toast position", "Screen corner for confirmation toasts. The quick note starts here too until you move it.", corners)),
       adv(row("Quick note position", "Drag the note bar anywhere; it reopens where you left it.", resetNote))),
   );
@@ -369,7 +385,14 @@ function buildGeneral() {
   f.append(lib, browse);
   const trashRow = sliderRow("Empty trash after", "Deleted items wait in the gallery's Trash tab, then are removed for good.",
     { min: 0, max: 365, stops: [1, 7, 14, 30, 60, 90, 365, 0], value: draft.trash_days ?? 30, fmt: (v) => (v === 0 ? "Never" : v === 1 ? "1 day" : `${v} days`), onInput: (v) => (draft.trash_days = v) }).row;
+  const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
+  const scale = choice([["auto", `Auto (${cap(autoScale)})`], ["small", "Small"], ["medium", "Medium"], ["large", "Large"]], draft.ui_scale || "auto", (v) => (draft.ui_scale = v));
+  const tut = el("button", "btn", "Show tutorial");
+  tut.onclick = () => invoke("tutorial_open");
   panes.general.append(
+    ...group("Windows",
+      row("Window size", "Size of the gallery and settings windows and everything in them. Auto picks from your screen: small on 1080p, medium on 1440p, large on bigger screens.", scale, { stack: true }),
+      row("Quick tutorial", "The three-step intro from the first start: snip, wheel, gallery.", tut)),
     ...group("Library",
       row("Library folder", "A OneDrive or Dropbox folder keeps it synced. Only new captures go to a new folder; move old files yourself.", f, { stack: true }),
       trashRow,
@@ -545,8 +568,16 @@ function animRows(): HTMLElement[] {
   const len = sliderRow("Duration", "How long the wheel and tag menu take to open. Short feels snappy; long shows off the motion.",
     { min: 100, max: 600, step: 10, value: dur(), fmt: ms, onInput: (v) => { ap.menu_anim_ms = v; clearTimeout(replay); replay = window.setTimeout(() => minis[cur()].play(), 160); } });
   const pick = row("Opening animation", "How the wheel and the tag menu appear. Hover a tile to preview it (needs Animations).", tiles, { stack: true });
-  const fps = sliderRow("Frame rate", "Caps how often animations draw. Auto follows your display; lower saves power on fast monitors.",
-    { min: 0, max: 240, stops: [15, 24, 30, 45, 60, 90, 120, 144, 165, 240, 0], value: Number(ap.anim_fps) || 0, fmt: (v) => (v === 0 ? "Auto" : `${v} fps`), onInput: (v) => (ap.anim_fps = v) });
+  const warn = el("div", "hint warn");
+  const fpsWarn = () => {
+    const v = Number(ap.anim_fps) || 0;
+    warn.textContent = v > 60 ? `Above 60 fps, animations use noticeably more CPU and GPU, and only look smoother on a display running at ${v} Hz or more.` : "";
+    warn.style.display = v > 60 ? "" : "none";
+  };
+  const fps = sliderRow("Frame rate", "Caps how often animations draw. Auto matches your display's refresh rate.",
+    { min: 0, max: 540, stops: [15, 24, 30, 45, 60, 90, 120, 144, 165, 240, 300, 360, 480, 540, 0], value: Number(ap.anim_fps) || 0, fmt: (v) => (v === 0 ? "Auto" : `${v} fps`), onInput: (v) => { ap.anim_fps = v; fpsWarn(); } });
+  (fps.row.firstElementChild as HTMLElement).append(warn);
+  fpsWarn();
   const sync = () => { const off = !ap.animations; tiles.classList.toggle("off", off); len.s.disable(off); fps.s.disable(off); pick.classList.toggle("dis", off); };
   sync();
   animSync = sync;
@@ -619,6 +650,7 @@ function buildAppearance() {
   const pv = el("div", "pv");
   pv.append(previewImg);
   panes.appearance.append(
+    ...group("Themes", ...themeRows()),
     ...group("Everywhere",
       row("Glass colours", "The sheen on panels, the wheel and the tag menu.", sws, { stack: true }),
       mk(SHEEN), ...glowRows(),
@@ -629,6 +661,90 @@ function buildAppearance() {
     ...group("Wheel, tag menu and note", pv, ...NATIVE_LOOK.map(mk)),
     ...group("Wheel shape", ...WHEEL_LOOK.map(mk)),
   );
+}
+
+// ---------- themes: named snapshots of the whole look ----------
+/** The Appearance knobs a theme carries: all of them except the toast corner (a position, set under Capture). */
+function lookOf(a: Appearance): Record<string, unknown> {
+  const o: Record<string, unknown> = { ...a };
+  delete o.popup_corner;
+  return o;
+}
+/** The current look matches this theme (every knob it stores, and its glass colours). */
+const sameLook = (t: SavedTheme) =>
+  Object.entries(lookOf(t.appearance)).every(([k, v]) => draft.appearance[k] === v) && t.glass.join() === draft.glass.join();
+
+function applyTheme(t: SavedTheme) {
+  draft.appearance = { ...draft.appearance, ...(lookOf(t.appearance) as Partial<Appearance>) } as Appearance;
+  draft.glass = [...t.glass];
+  commit(true);
+  // rebuild the tab so every control shows the new values
+  const top = $("panes").scrollTop;
+  panes.appearance.replaceChildren();
+  buildAppearance();
+  $("panes").scrollTop = top;
+  refreshPreview();
+}
+
+let paintThemes: () => void = () => {};
+function themeRows(): HTMLElement[] {
+  const grid = el("div", "themes ctl");
+  const paint = () => {
+    grid.replaceChildren();
+    for (const t of [defaults, ...draft.themes]) {
+      const builtIn = t === defaults;
+      const b = el("button", "theme" + (sameLook(t) ? " on" : ""));
+      const sw = el("span", "tsw");
+      sw.style.background = `linear-gradient(135deg, ${t.glass.join(", ")})`;
+      b.append(sw, el("b", "", t.name));
+      b.title = builtIn ? "The look Stash starts with" : `Apply ${t.name}`;
+      b.onclick = () => applyTheme(t);
+      if (!builtIn) {
+        const x = el("span", "tx", "×");
+        x.title = "Delete this theme";
+        x.onclick = (e) => {
+          e.stopPropagation();
+          if (!x.classList.contains("arm")) {
+            x.classList.add("arm"); x.textContent = "Delete?";
+            setTimeout(() => { x.classList.remove("arm"); x.textContent = "×"; }, 2500);
+            return;
+          }
+          draft.themes = draft.themes.filter((o) => o !== t);
+          commit(true);
+          paint();
+        };
+        b.append(x);
+      }
+      grid.append(b);
+    }
+  };
+  paint();
+  paintThemes = paint;
+  const name = el("input", "field");
+  name.type = "text";
+  name.placeholder = "Name this look";
+  name.maxLength = 40;
+  name.spellcheck = false;
+  const save = el("button", "btn", "Save current look");
+  const doSave = () => {
+    const n = name.value.trim();
+    if (!n) { name.focus(); say("Give the theme a name first.", true); return; }
+    const t: SavedTheme = { name: n, appearance: structuredClone(draft.appearance), glass: [...draft.glass] };
+    const i = draft.themes.findIndex((o) => o.name.toLowerCase() === n.toLowerCase());
+    if (i >= 0) draft.themes[i] = t; else draft.themes.push(t);
+    commit(true);
+    name.value = "";
+    paint();
+    say(i >= 0 ? `Updated ${n}` : `Saved ${n}`, false, true);
+  };
+  save.onclick = doSave;
+  name.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); doSave(); } });
+  const f = el("div", "folder ctl");
+  f.append(name, save);
+  return [
+    row("Your themes", "Click one to apply it. A theme keeps every setting on this tab, including the glass colours.", grid, { stack: true }),
+    row("Save as a theme", "Saving under an existing name updates that theme.", f, { stack: true }),
+  ];
 }
 
 // ---------- shortcut recorder ----------
@@ -718,6 +834,9 @@ async function init() {
   draft = structuredClone(d.config);
   saved = structuredClone(d.config);
   autostartSupported = d.autostart_supported;
+  autoScale = d.auto_scale || "medium";
+  defaults = { name: "Default", appearance: d.default_appearance, glass: d.default_glass };
+  draft.themes ??= [];
   buildTabs();
   buildCapture();
   buildWheel();

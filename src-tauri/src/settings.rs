@@ -15,6 +15,11 @@ pub struct SettingsDto {
     config: Config,
     /// Autostart is only managed in release builds (a debug exe must not register itself at login).
     autostart_supported: bool,
+    /// What Auto resolves to on this PC (small | medium | large), shown next to Auto.
+    auto_scale: &'static str,
+    /// The built-in look, for the Default theme tile.
+    default_appearance: crate::config::Appearance,
+    default_glass: Vec<String>,
 }
 
 pub fn open(app: &AppHandle) {
@@ -29,21 +34,69 @@ pub fn open(app: &AppHandle) {
         }
         // a snapshot of the desktop (before the window exists) for the Appearance preview
         *app.state::<PreviewBg>().0.lock().unwrap() = preview_snapshot();
+        let f = scale_factor(&app.state::<AppState>().cfg());
         let b = WebviewWindowBuilder::new(&app, "settings", WebviewUrl::App("settings.html".into()))
             .title("Stash settings")
-            .inner_size(640.0, 760.0)
-            .min_inner_size(560.0, 560.0)
+            .inner_size(640.0 * f, 760.0 * f)
+            .min_inner_size(560.0 * f, 560.0 * f)
             .transparent(true) // the backdrop (theme::style_window) shows through the translucent page
             .theme(Some(tauri::Theme::Dark))
             .visible(false); // shown by `window_ready` after the first paint
         match b.build() {
             Ok(w) => {
+                let _ = w.set_zoom(f);
                 crate::theme::style_window(&w, &app.state::<AppState>().cfg());
                 crate::gallery::show_if_not_ready(w)
             }
             Err(e) => tracing::error!("settings window: {e}"),
         }
     });
+}
+
+/// Settings > General > Window size: how much the gallery and settings windows (and their content) are scaled.
+pub fn scale_factor(cfg: &Config) -> f64 {
+    match cfg.ui_scale.as_str() {
+        "small" => 0.8,
+        "large" => 1.2,
+        "medium" => 1.0,
+        _ => match auto_scale() {
+            "small" => 0.8,
+            "large" => 1.2,
+            _ => 1.0,
+        },
+    }
+}
+
+/// The size Auto picks, from the primary monitor's work area in logical px (the UI was designed on a 1440p screen
+/// at 100 %: about 1400 px tall). 1080p-class screens get small, 4K at 100 % gets large.
+pub fn auto_scale() -> &'static str {
+    let (wa, s) = crate::winutil::primary_work_area();
+    let h = (wa.bottom - wa.top) as f32 / s.max(0.5);
+    if h < 1200.0 {
+        "small"
+    } else if h < 1800.0 {
+        "medium"
+    } else {
+        "large"
+    }
+}
+
+/// Window size changed in settings: zoom the open windows and resize them by the same ratio.
+fn rescale_windows(app: &AppHandle, old: f64, new: f64) {
+    for label in ["gallery", "settings"] {
+        let Some(w) = app.get_webview_window(label) else { continue };
+        let _ = w.set_zoom(new);
+        if w.is_maximized().unwrap_or(false) {
+            continue;
+        }
+        if let (Ok(sz), Ok(sf)) = (w.inner_size(), w.scale_factor()) {
+            let k = new / old;
+            let l = sz.to_logical::<f64>(sf);
+            let (mw, mh) = if label == "gallery" { (640.0, 420.0) } else { (560.0, 560.0) };
+            let _ = w.set_min_size(Some(tauri::LogicalSize::new(mw * new, mh * new)));
+            let _ = w.set_size(tauri::LogicalSize::new(l.width * k, l.height * k));
+        }
+    }
 }
 
 /// On launch, make the OS autostart entry match the config (release builds only).
@@ -68,7 +121,8 @@ fn set_autostart(app: &AppHandle, on: bool) {
 
 #[tauri::command]
 pub fn settings_get(state: State<AppState>) -> SettingsDto {
-    SettingsDto { config: state.cfg(), autostart_supported: !cfg!(debug_assertions) }
+    let d = Config::default();
+    SettingsDto { config: state.cfg(), autostart_supported: !cfg!(debug_assertions), auto_scale: auto_scale(), default_appearance: d.appearance, default_glass: d.glass }
 }
 
 /// Valid wheel action ids in canonical order; at least two.
@@ -95,6 +149,19 @@ fn apply(app: &AppHandle, new: Config) -> Result<Config> {
     new.wheel_actions = valid_wheel(&new.wheel_actions)?;
     new.glass = valid_glass(&new.glass)?;
     new.style_rev = crate::config::STYLE_REV;
+    // the tutorial flag is owned by the tutorial window: a settings page opened earlier must not reset it
+    new.tutorial_done |= old.tutorial_done;
+    if !crate::config::UI_SCALES.contains(&new.ui_scale.as_str()) {
+        new.ui_scale = "auto".into();
+    }
+    for t in &mut new.themes {
+        t.appearance.clamp();
+        if valid_glass(&t.glass).is_err() {
+            t.glass = new.glass.clone();
+        }
+        t.name = t.name.trim().chars().take(40).collect();
+    }
+    new.themes.retain(|t| !t.name.is_empty());
     new.rec_fps = new.rec_fps.clamp(5, 60);
     new.rec_max_secs = new.rec_max_secs.min(3600);
     new.hold_ms = new.hold_ms.clamp(80, 1000);
@@ -130,6 +197,11 @@ fn apply(app: &AppHandle, new: Config) -> Result<Config> {
     }
     if new.keep_gallery_ready != old.keep_gallery_ready {
         if new.keep_gallery_ready { crate::gallery::prewarm(app) } else { crate::gallery::release(app) }
+    }
+    let (fo, fnew) = (scale_factor(&old), scale_factor(&new));
+    if (fo - fnew).abs() > 1e-6 {
+        let a = app.clone();
+        let _ = app.run_on_main_thread(move || rescale_windows(&a, fo, fnew));
     }
     let look_changed = serde_json::to_value(&new.appearance).ok() != serde_json::to_value(&old.appearance).ok() || new.glass != old.glass;
     if look_changed {

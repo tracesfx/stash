@@ -116,6 +116,7 @@ fn run(app: AppHandle, source: SourceInfo, style: Style, corner: &str) {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *st as *mut St as isize);
         OPEN.store(hwnd.0 as isize, Ordering::SeqCst);
         paint(&mut st);
+        crate::winutil::prime_cursor(IDC_SIZEALL);
         let _ = ShowWindow(hwnd, SW_SHOW);
         crate::winutil::bring_to_front(hwnd.0 as isize);
         tracing::info!("note visible {} ms after open", t0.elapsed().as_millis());
@@ -178,7 +179,7 @@ fn save(st: &mut St) {
             }
             tracing::info!("note saved in {} ms ({} tags)", t0.elapsed().as_millis(), tags.len());
             let detail = if tags.is_empty() { saved.meta } else { tags.iter().map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ") };
-            crate::toast::show(&st.app, crate::toast::Toast { title: "Note saved".into(), detail, thumb: None, ms: 1400 });
+            crate::toast::show(&st.app, crate::toast::Toast { title: "Note saved".into(), detail, thumb: None, ms: 1400, fx: true });
         }
         Err(e) => {
             tracing::error!("note save: {e:#}");
@@ -365,7 +366,7 @@ mod tests {
     #[test]
     #[ignore]
     fn previews() {
-        let s = 1.5;
+        let s: f32 = std::env::var("STASH_PREVIEW_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5);
         let style = preview::style();
         let frame = preview::backdrop(900, 600);
         let (w, h) = size(s);
@@ -374,7 +375,7 @@ mod tests {
         let mut f = TextField::new(4000);
         let pm = render(&mut f, &style, s, w as u32, h as u32, bg.as_ref(), true).unwrap();
         preview::save(&pm, &frame, origin, "note_empty.png");
-        f.set_text("Great hook at 3:20, steal the zoom transition #idea #yt-ref");
+        f.set_text(&std::env::var("STASH_PREVIEW_NOTE").unwrap_or_else(|_| "Great hook at 3:20, steal the zoom transition #idea #yt-ref".into()));
         let pm = render(&mut f, &style, s, w as u32, h as u32, bg.as_ref(), true).unwrap();
         preview::save(&pm, &frame, origin, "note_typed.png");
     }

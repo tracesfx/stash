@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Welcome to Stash</title>
+    <style>
+      html, body { overflow: hidden; user-select: none; }
+      #app { height: 100%; display: flex; flex-direction: column; padding: 20px 22px 18px; gap: 14px; }
+      body.pre #app { opacity: 0; }
+      body.opening #app { animation: w-in 420ms var(--ease) both; }
+      @keyframes w-in { from { opacity: 0; transform: translateY(-8px) scale(.985); } }
+      header { display: flex; align-items: center; gap: 10px; -webkit-app-region: drag; app-region: drag; }
+      header img { width: 26px; height: 26px; filter: drop-shadow(0 2px 6px rgba(0, 0, 0, .35)); }
+      h1 { flex: 1; margin: 0; font: 600 1.38rem/1.1 var(--font-display); }
+      #skip { -webkit-app-region: no-drag; app-region: no-drag; }
+      ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; flex: 1; min-height: 0; }
+      li { display: grid; grid-template-columns: 28px 1fr; gap: 12px; align-items: center; padding: 10px 12px; border-radius: var(--r-l); color: var(--faint); transition: background 260ms var(--ease), color 260ms var(--ease), box-shadow 260ms var(--ease); }
+      li .n { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; font-weight: 600; box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, .22); transition: all 300ms var(--spring); }
+      li b { display: block; font-weight: 600; color: var(--dim); }
+      li span { display: block; margin-top: 2px; line-height: 1.4; }
+      li.cur { background: var(--glass-card), var(--surface); box-shadow: var(--rim); color: var(--dim); }
+      li.cur b { color: var(--txt); }
+      li.cur .n { background: color-mix(in srgb, var(--hover) 75%, transparent); box-shadow: none; color: #fff; animation: w-pulse 1.8s ease-in-out infinite; }
+      li.done .n { background: rgba(255, 255, 255, .92); box-shadow: none; color: transparent; position: relative; }
+      li.done .n::after { content: ""; position: absolute; left: 10px; top: 6px; width: 6px; height: 12px; border: solid #111; border-width: 0 2.2px 2.2px 0; transform: rotate(45deg); }
+      li.done b { text-decoration: line-through; text-decoration-color: rgba(255, 255, 255, .35); }
+      @keyframes w-pulse { 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--hover) 22%, transparent); } }
+      kbd { font-size: .85em; }
+      footer { display: flex; align-items: center; gap: 10px; min-height: 34px; }
+      footer .grow { flex: 1; color: var(--faint); font-size: 0.923rem; }
+      #done { display: none; }
+      body.all #done { display: inline-flex; }
+      body.all #later { display: none; }
+    </style>
+  </head>
+  <body class="glass pre">
+    <div id="app">
+      <header>
+        <img src="/logo.png" alt="" />
+        <h1>Welcome to Stash</h1>
+        <button class="btn ghost" id="skip" title="Skip the tutorial">Skip</button>
+      </header>
+      <ol id="steps"></ol>
+      <footer>
+        <span class="grow" id="foot">Try each one now. This card moves on by itself.</span>
+        <button class="btn" id="later">Next</button>
+        <button class="btn pri" id="done">Start stashing</button>
+      </footer>
+    </div>
+    <script type="module" src="/src/welcome.ts"></script>
+  </body>
+</html>

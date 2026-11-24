@@ -85,6 +85,22 @@
       .atile span { font-size: 0.846rem; line-height: 1.3; color: var(--faint); text-align: center; }
       .atiles.off { opacity: .45; pointer-events: none; }
 
+      /* small segmented choice (window size) */
+      .seg.mini { flex-wrap: wrap; justify-self: start; }
+      .seg.mini button { padding: 6px 14px; transition: color var(--dur) var(--ease), background var(--dur) var(--ease); }
+      .seg.mini button.on { background: linear-gradient(180deg, rgba(255, 255, 255, .2), rgba(255, 255, 255, .1)); box-shadow: var(--rim); }
+      .hint.warn { color: #ffcf7a; }
+      /* themes */
+      .themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: 10px; }
+      .theme { position: relative; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 0; border-radius: var(--r-l); text-align: left; cursor: pointer; color: var(--dim); background: rgba(0, 0, 0, .16); box-shadow: inset 0 0 0 1px var(--line); transition: background 180ms var(--ease), box-shadow 180ms var(--ease), transform 220ms var(--spring); }
+      .theme:hover { background: rgba(255, 255, 255, .07); color: var(--txt); }
+      .theme:active { transform: scale(.97); }
+      .theme.on { color: var(--txt); background: linear-gradient(180deg, rgba(255, 255, 255, .16), rgba(255, 255, 255, .07)); box-shadow: var(--rim), 0 0 0 2px color-mix(in srgb, var(--hover) 80%, transparent); }
+      .theme .tsw { flex: none; width: 26px; height: 26px; border-radius: 50%; box-shadow: 0 0 0 1.5px rgba(255, 255, 255, .3), 0 3px 8px rgba(0, 0, 0, .3); }
+      .theme b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+      .theme .tx { position: absolute; top: -6px; right: -6px; min-width: 20px; height: 20px; padding: 0 6px; border-radius: 999px; display: none; font-size: 0.846rem; line-height: 20px; text-align: center; color: #fff; background: rgba(30, 31, 38, .95); box-shadow: var(--rim); }
+      .theme:hover .tx, .theme .tx.arm { display: block; }
+      .theme .tx:hover, .theme .tx.arm { background: var(--danger); color: #111; }
       /* library folder */
       .folder { display: flex; gap: 8px; }
       .folder .field { flex: 1; min-width: 0; font-size: 0.962rem; }

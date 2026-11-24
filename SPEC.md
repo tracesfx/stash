@@ -18,9 +18,9 @@ so things never get saved. Capture must cost **one hotkey + one drag** and nothi
 Mobile, cloud accounts/sync service, collaboration, always-on recording/replay buffer, AI tagging (embeddings deferred, see §11), a drawing whiteboard (removed in M6; the gallery's Canvas view arranges items instead).
 
 ## 4. Capture methods (all write to the same library)
-**One global hotkey: `Ctrl+Alt+S`** (rebindable). No other global hotkeys.
-- **Tap** (release < 200 ms, or start dragging): instant **region snip** (C1).
-- **Hold** (≥ 200 ms): a **radial wheel** appears centred on the cursor; move toward a wedge and release the key (or click) to choose; release in the dead centre or `Esc` cancels. Same flick always picks the same wedge (fixed wedge positions).
+**One global hotkey: `Ctrl+Space`** (rebindable; the default for new installs since 1.2 — existing configs keep their hotkey, older ones used `Ctrl+Alt+S`). No other global hotkeys.
+- **Tap** (release < hold delay, default 110 ms, or start dragging): instant **region snip** (C1).
+- **Hold** (≥ hold delay, default 110 ms): a **radial wheel** appears centred on the cursor; move toward a wedge and release the key (or click) to choose; release in the dead centre or `Esc` cancels. Same flick always picks the same wedge (fixed wedge positions).
 - The wheel window is topmost but **no-activate** (never takes focus), so the foreground app keeps its selection/clipboard state for C4.
 - Needs key-down **and** key-up events for the hotkey (Tauri global-shortcut provides both).
 
@@ -108,6 +108,17 @@ Opened from tray click or wheel wedge C7. With **Keep gallery ready** (default o
 **Right-click menu (M9).** On items: open, copy, source page, show in folder, favourite, tag, hide, new canvas, export, trash (Restore / Delete forever in Trash). On tags, kinds and chips: show only, pin to Favourite tags, hide. On empty space: Add files…, Import folder…, Paste, Select all, Clear filters, View options, Export what is shown, Open library folder, Reload. Text fields keep the normal text menu.
 
 **Viewer (M9).** Pictures zoom with the wheel at the pointer (up to 16x; pixels stay crisp past 2x real size), drag pans, double-click toggles fit / real size, + / - / 0 keys, Esc fits first and closes second. Closing or stepping the viewer pauses and unloads clips and sounds.
+
+**Cleanup batch (1.2).**
+- *Themes:* Settings > Appearance > Themes saves the whole look under a name (every Appearance knob except the toast corner, plus the glass colours; config `themes`). Clicking a theme applies it; a built-in Default tile restores the shipped look. The shipped default look will be replaced by one the user picks.
+- *Window size:* Settings > General > Window size = Auto | Small | Medium | Large (config `ui_scale`): the gallery, settings and tutorial windows are created at 0.8 / 1.0 / 1.2 x their size and their web content is zoomed by the same factor (WebView2 zoom). Auto picks from the primary monitor's work area in logical px (< 1200 tall = Small, < 1800 = Medium, else Large); Medium is the look designed on 1440p. Changing it resizes open windows live.
+- *First run:* new installs get `Ctrl+Space` and a three-step tutorial card (snip, hold for the wheel, open the gallery) that ticks each step off as the user does it (`tutorial.rs`, welcome.html). It never shows again once finished or skipped (`tutorial_done`; configs from before 1.2 count as done). Settings > General > Show tutorial reopens it.
+- *Frame rate:* the cap goes up to 540 fps (stops 15 … 540, Auto = display refresh); above 60 fps Settings shows a cost warning.
+- *Notes are editable:* select a note or link and edit its text in the detail panel (double-click the card focuses it). Saves after a pause, on blur and on Ctrl+Enter; Esc reverts. `#words` typed into a note become tags. Links must stay a single web address.
+- *Save sparkle:* the Saved / Saved to Favourites / Note saved toasts throw a short burst of glass-coloured sparkles from the thumbnail (≈0.9 s, click-through, no focus). Settings > Capture > Save sparkle (config `save_fx`, needs Animations).
+- *Tag radial at screen edges:* the ring and its text pill always stay inside the monitor's work area; near an edge the ring moves inward instead of being cut off, and pointer-off closing only starts once the pointer has been on it (or clearly moved away).
+- *White flash on open:* the user sees one light-grey frame as the gallery appears (installed 1.1.0). Windows are now shown cloaked and uncloaked after 3 composed frames; not yet confirmed fixed.
+- *Audio:* sound files play right on their gallery card (play/pause, a waveform-style strip that fills and seeks on click; one sound at a time, stops when the gallery closes). Also aac / opus / weba.
 
 **Burn (M8).** Every delete burns: gallery cards (trash, delete forever, empty trash), canvas items (remove from canvas) and canvas tiles (delete canvas). Everything deleted at once burns together (up to 60 on screen; the noise grid gets coarser when many burn). After a burn the grid re-arranges only once every running burn has finished. Pictures in the viewer and the panel preview drag the item's file (native drag), never the preview image; the drag picture is a small 96 px icon (`gallery_drag_icon`, cached as `.thumbs/<id>.drag.png`). Imported pictures without a stored size get it from the file header at scan time, so the first layout is final.
 

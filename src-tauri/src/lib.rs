@@ -20,6 +20,7 @@ mod tags;
 mod textedit;
 mod toast;
 mod tray;
+mod tutorial;
 mod uia;
 mod wheel;
 mod winutil;
@@ -142,7 +143,12 @@ pub fn run() {
             gallery::gallery_changed,
             gallery::gallery_hidden_tags,
             gallery::gallery_set_hidden_tags,
-            stats::library_stats
+            stats::library_stats,
+            tutorial::tutorial_info,
+            tutorial::tutorial_finish,
+            tutorial::tutorial_open,
+            gallery::gallery_note_text,
+            gallery::gallery_set_note_text
         ])
         .setup(move |app| {
             use tauri::Manager;
@@ -173,7 +179,11 @@ pub fn run() {
                 std::thread::spawn(move || {
                     // parse the UI fonts now, not on the first wheel / tag menu
                     let _ = (gfx::font(), gfx::font_regular());
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    if !h.state::<AppState>().cfg().tutorial_done {
+                        tutorial::open(&h);
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
                     gallery::prewarm(&h);
                 });
             }
@@ -190,6 +200,7 @@ pub fn run() {
                     p.store(false, std::sync::atomic::Ordering::SeqCst);
                     use tauri::Emitter;
                     let _ = h.emit_to("gallery", "library-changed", ());
+                    tutorial::step(&h, "saved");
                 });
             });
             Ok(())
@@ -213,8 +224,37 @@ pub fn run() {
 fn demo(app: &tauri::AppHandle, args: &[String]) {
     use tauri::Manager;
     let what = args.iter().skip_while(|a| *a != "--demo").nth(1).cloned().unwrap_or_default();
+    // `--delay <ms>`: show it later, after the launching process has exited (its own startup feedback cursor
+    // would otherwise mask what the window does to the cursor)
+    if let Some(ms) = args.iter().skip_while(|a| *a != "--delay").nth(1).and_then(|v| v.parse::<u64>().ok()) {
+        let (app, args) = (app.clone(), args.iter().filter(|a| *a != "--delay").cloned().collect::<Vec<_>>());
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            demo(&app, &args);
+        });
+        return;
+    }
     let root = app.state::<AppState>().cfg().library_path;
     match what.as_str() {
+        "wheel" => {
+            // the hold wheel, released by itself after 1.2 s
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let mut cur = windows::Win32::Foundation::POINT::default();
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut cur);
+                }
+                let release = std::sync::Arc::new(AtomicBool::new(false));
+                let r2 = release.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                    r2.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                let scale = winutil::monitor_at(cur.x, cur.y).scale;
+                let acts = wheel::enabled(&app.state::<AppState>().cfg().wheel_actions);
+                let _ = wheel::run(cur, scale, release, theme::style(&app), None, acts);
+            });
+        }
         "note" => note::open(app, winutil::SourceInfo::default()),
         "toast" => toast::notice(app, "Capture paused"),
         "radial" | "textnote" => {

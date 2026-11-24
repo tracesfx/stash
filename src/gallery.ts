@@ -104,7 +104,7 @@ const full = (it: Item) => `http://stash.localhost/full/${enc(it.id)}`;
 const isImg = (it: Item) => it.kind === "image";
 const isNote = (it: Item) => it.kind === "text" || it.kind === "link";
 const VIDEO = new Set(["mp4", "m4v", "webm", "mov"]);
-const AUDIO = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac"]);
+const AUDIO = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac", "aac", "opus", "weba"]);
 const ext = (it: Item) => it.ext.toLowerCase();
 const isVideo = (it: Item) => it.kind !== "image" && VIDEO.has(ext(it));
 const isAudio = (it: Item) => it.kind !== "image" && AUDIO.has(ext(it));
@@ -727,6 +727,75 @@ function thumbImg(c: HTMLElement, it: Item, eager: boolean, fallbackRatio: strin
   return img;
 }
 
+// ---------- audio cards: play in place (one sound at a time) ----------
+let audioEl: HTMLAudioElement | null = null;
+let audioCardEl: HTMLElement | null = null;
+function stopAudio() {
+  if (audioEl) { audioEl.pause(); audioEl.removeAttribute("src"); audioEl.load(); audioEl = null; }
+  if (audioCardEl) { audioCardEl.classList.remove("playing"); paintWave(audioCardEl, 0); audioCardEl = null; }
+}
+const fmtTime = (t: number) => (isFinite(t) && t >= 0 ? `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}` : "");
+function paintWave(box: HTMLElement, p: number) {
+  const bars = box.querySelectorAll(".aw i");
+  const n = Math.round(p * bars.length);
+  bars.forEach((b, i) => b.classList.toggle("on", i < n));
+}
+function audioCard(it: Item): HTMLElement {
+  const box = el("div", "au");
+  const play = el("button", "aplay");
+  play.title = "Play";
+  play.innerHTML = '<svg viewBox="0 0 16 16"><path class="pl" d="M5 3.2v9.6L12.6 8z"/><path class="pa" d="M4.5 3h2.4v10H4.5zM9.1 3h2.4v10H9.1z"/></svg>'; // static markup
+  const name = el("div", "an", it.original_path?.split(/[\\/]/).pop() ?? it.name);
+  const tm = el("span", "at", it.ext.toUpperCase());
+  // a waveform-like strip (decorative, stable per item): it fills as the sound plays; click to seek
+  const wave = el("div", "aw");
+  let h = 2166136261;
+  for (const ch of it.id) h = Math.imul(h ^ ch.charCodeAt(0), 16777619);
+  for (let i = 0; i < 36; i++) {
+    h = Math.imul(h ^ (h >>> 13), 0x5bd1e995);
+    const v = 0.25 + (((h >>> 0) % 1000) / 1000) * 0.75 * (0.55 + 0.45 * Math.sin((i / 35) * Math.PI));
+    const b = el("i");
+    b.style.height = `${Math.round(v * 100)}%`;
+    wave.append(b);
+  }
+  const head = el("div", "ah");
+  head.append(play, name);
+  box.append(head, wave, tm);
+  const start = (at?: number) => {
+    if (audioEl && audioCardEl === box) {
+      if (at != null && isFinite(audioEl.duration)) { audioEl.currentTime = at * audioEl.duration; if (audioEl.paused) audioEl.play().catch(() => {}); }
+      else if (audioEl.paused) audioEl.play().catch(() => {});
+      else audioEl.pause();
+      return;
+    }
+    stopAudio();
+    const a = new Audio(full(it));
+    audioEl = a;
+    audioCardEl = box;
+    a.addEventListener("play", () => box.classList.add("playing"));
+    a.addEventListener("pause", () => box.classList.remove("playing"));
+    a.addEventListener("loadedmetadata", () => { if (at != null && isFinite(a.duration)) a.currentTime = at * a.duration; });
+    a.addEventListener("timeupdate", () => {
+      if (!isFinite(a.duration) || audioEl !== a) return;
+      paintWave(box, a.currentTime / a.duration);
+      tm.textContent = `${fmtTime(a.currentTime)} / ${fmtTime(a.duration)}`;
+    });
+    a.addEventListener("ended", () => { paintWave(box, 0); box.classList.remove("playing"); });
+    a.play().catch((e) => { if (audioEl === a) flash(`Can't play this file (${String(e)})`); });
+  };
+  play.addEventListener("click", (e) => { e.stopPropagation(); start(); });
+  wave.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const r = wave.getBoundingClientRect();
+    start(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
+  });
+  for (const t of [play, wave]) {
+    t.addEventListener("dblclick", (e) => e.stopPropagation());
+    t.addEventListener("pointerdown", (e) => e.stopPropagation());
+  }
+  return box;
+}
+
 function card(it: Item, eager = false): HTMLElement {
   const c = el("div", "card tile" + (selected.has(it.id) ? " sel" : "") + (it.favorite && tab !== "trash" ? " fav" : ""));
   c.dataset.id = it.id;
@@ -771,6 +840,8 @@ function card(it: Item, eager = false): HTMLElement {
       setTimeout(() => { old.removeAttribute("src"); old.load(); old.remove(); }, 180); // releases the decoder
     });
     c.append(el("span", "vbadge", "▶"));
+  } else if (isAudio(it)) {
+    c.append(audioCard(it));
   } else if (it.kind === "text" || it.kind === "link" || isTextFile(it)) {
     const t = el("div", "t" + (it.kind === "link" ? " link" : ""), it.text ?? "");
     if (isTextFile(it)) { t.classList.add("code"); t.append(el("span", "badge", it.ext)); }
@@ -1301,7 +1372,11 @@ grid.addEventListener("click", (e) => {
 });
 grid.addEventListener("dblclick", (e) => {
   const c = (e.target as HTMLElement).closest<HTMLElement>(".card");
-  if (c) openViewer(shown.findIndex((i) => i.id === c.dataset.id));
+  if (!c) return;
+  const it = byId(c.dataset.id!);
+  // notes open for editing in the detail panel (clicking already selected it)
+  if (it && canEditText(it) && tab !== "trash") { editNote(it.id); return; }
+  openViewer(shown.findIndex((i) => i.id === c.dataset.id));
 });
 
 /** Arrow keys: left/right step through the list, up/down go to the nearest card above/below. */
@@ -1647,7 +1722,62 @@ addEventListener("wheel", (e) => {
   e.stopPropagation();
   detail.scrollTop += e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
 }, { passive: false, capture: true });
+// ---------- note editing (detail panel) ----------
+const canEditText = (it: Item) => it.kind === "text" || it.kind === "link";
+/** The note being edited: kept across showDetail() calls so a library refresh never interrupts typing. */
+let noteEd: { id: string; ta: HTMLTextAreaElement; timer?: number; saved: string } | null = null;
+function editNote(id: string) {
+  if (!(selected.size === 1 && selected.has(id))) { selected = new Set([id]); refreshSel(); }
+  if (noteEd?.id === id) { noteEd.ta.focus(); noteEd.ta.setSelectionRange(noteEd.ta.value.length, noteEd.ta.value.length); }
+}
+function noteEditor(it: Item): HTMLElement {
+  const ta = el("textarea", "tx ed");
+  ta.value = it.text ?? "";
+  ta.spellcheck = true;
+  ta.placeholder = it.kind === "link" ? "https://…" : "Write your note";
+  ta.rows = 3;
+  const ed = { id: it.id, ta, timer: undefined as number | undefined, saved: ta.value };
+  noteEd = ed;
+  const fit = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight + 2, 320) + "px"; };
+  // the list carries only the start of long notes: load the whole text before it can be edited
+  ta.readOnly = true;
+  invoke<string>("gallery_note_text", { id: it.id }).then((t) => {
+    if (noteEd !== ed) return;
+    ta.value = t; ed.saved = t; ta.readOnly = false; fit();
+  }).catch(() => { ta.readOnly = false; });
+  const save = async () => {
+    clearTimeout(ed.timer);
+    const text = ta.value.trim();
+    if (text === ed.saved.trim()) return;
+    if (!text) { ta.classList.add("bad"); return; }
+    try {
+      await invoke("gallery_set_note_text", { id: ed.id, text });
+      ed.saved = text;
+      ta.classList.remove("bad");
+      const cur = byId(ed.id);
+      if (!cur) return;
+      cur.text = text.slice(0, 400);
+      // #words typed into a note become tags, like in the quick note
+      const add = [...text.matchAll(/(?:^|\s)#([\p{L}\p{N}_-]{1,40})/gu)].map((m) => m[1].toLowerCase()).filter((t) => !cur.tags.some((x) => x.toLowerCase() === t));
+      if (add.length) await saveMeta(cur, cur.caption, [...cur.tags, ...add]);
+      else refreshItem(cur);
+    } catch (e) { ta.classList.add("bad"); flash(String(e)); }
+  };
+  ta.addEventListener("input", () => { fit(); ta.classList.remove("bad"); clearTimeout(ed.timer); ed.timer = window.setTimeout(save, 700); });
+  ta.addEventListener("blur", save);
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); ta.value = ed.saved; fit(); ta.blur(); }
+    else if (e.key === "Enter" && (e.ctrlKey || it.kind === "link")) { e.preventDefault(); ta.blur(); }
+    e.stopPropagation(); // typing must not trigger gallery shortcuts
+  });
+  requestAnimationFrame(fit);
+  return ta;
+}
+
 function showDetail() {
+  // a refresh while a note is being typed into keeps the editor as it is
+  if (noteEd && document.activeElement === noteEd.ta && selected.size === 1 && selected.has(noteEd.id) && noteEd.ta.isConnected) return;
+  if (noteEd) { const prev = noteEd; noteEd = null; if (prev.ta.value.trim() !== prev.saved.trim()) prev.ta.dispatchEvent(new Event("blur")); }
   detail.replaceChildren();
   detail.classList.remove("fresh");
   void detail.offsetWidth;
@@ -1667,6 +1797,8 @@ function showDetail() {
     pv.src = ext(it) === "png" ? full(it) : thumb(it);
     pv.onclick = () => openViewer(shown.findIndex((x) => x.id === it.id));
     detail.append(pv);
+  } else if (canEditText(it) && tab !== "trash") {
+    detail.append(el("label", "l", it.kind === "link" ? "Link" : "Note"), noteEditor(it));
   } else if (it.text) {
     detail.append(el("div", "tx", it.text));
   }
@@ -3032,7 +3164,7 @@ q.addEventListener("blur", () => qs.classList.remove("on"));
 q.addEventListener("focus", paintSugg);
 
 window.addEventListener("keydown", (e) => {
-  const inField = (e.target as HTMLElement).tagName === "INPUT";
+  const inField = /^(INPUT|TEXTAREA)$/.test((e.target as HTMLElement).tagName);
   if (ctxMenu.classList.contains("on")) { if (e.key === "Escape") { e.preventDefault(); closeMenu(); return; } closeMenu(); }
   if (viewer.classList.contains("on")) {
     const mid = () => { const r = zoomImg!.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2] as const; };
@@ -3110,7 +3242,7 @@ window.addEventListener("drop", async (e) => {
 
 // Ctrl+V pastes the clipboard (files, an image, text or a link) into the library.
 window.addEventListener("keydown", async (e) => {
-  if (!(e.ctrlKey && e.key.toLowerCase() === "v") || (e.target as HTMLElement).tagName === "INPUT" || viewer.classList.contains("on")) return;
+  if (!(e.ctrlKey && e.key.toLowerCase() === "v") || /^(INPUT|TEXTAREA)$/.test((e.target as HTMLElement).tagName) || viewer.classList.contains("on")) return;
   e.preventDefault();
   try {
     flash(await invoke<string>("gallery_paste"));
@@ -3233,6 +3365,7 @@ async function showWarm() {
 }
 listen("gallery-show", () => { showWarm(); });
 listen("gallery-hide", async () => {
+  stopAudio();
   // blank the page before the window hides, so the next show starts from an empty frame, not this one
   clearTimeout(openTimer);
   document.body.classList.remove("opening");

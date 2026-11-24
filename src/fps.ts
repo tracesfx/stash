@@ -42,7 +42,7 @@ let raf = 0, lastFrame = 0, lastStep = 0;
 const active = () => cap > 0 && cap < (1000 / period) * 0.95;
 
 export function setFpsCap(fps: number, animations: boolean) {
-  cap = animations && fps >= 15 ? Math.min(240, fps) : 0;
+  cap = animations && fps >= 15 ? Math.min(540, fps) : 0;
   if (!active()) release();
   kick();
 }

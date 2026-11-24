@@ -5,7 +5,7 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
-  build: { rollupOptions: { input: { main: "index.html", gallery: "gallery.html", settings: "settings.html" } } },
+  build: { rollupOptions: { input: { main: "index.html", gallery: "gallery.html", settings: "settings.html", welcome: "welcome.html" } } },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

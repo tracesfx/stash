@@ -75,7 +75,7 @@ pub fn show(app: &AppHandle, req: Request) {
             Preview::Image(t) => Some(t.clone()),
             Preview::Text(_) => None,
         };
-        crate::toast::show(&app, crate::toast::Toast { title: "Saved".into(), detail: req.meta, thumb, ms: 1600 });
+        crate::toast::show(&app, crate::toast::Toast { title: "Saved".into(), detail: req.meta, thumb, ms: 1600, fx: true });
         return;
     }
     let style = crate::theme::style_for(&cfg);
@@ -149,6 +149,10 @@ struct St {
     glow_pos: (f32, f32),
     last_move: Instant,
     off_since: Option<Instant>,
+    /// Where the pointer was when the radial opened (window coords). Near a screen edge the ring is moved away
+    /// from the pointer, so pointer-off only counts once the pointer has been on it (`entered`) or moved away.
+    open_at: (f32, f32),
+    entered: bool,
     /// Pointer-off fade: 0 = fully shown .. 1 = gone. It can reverse while the pointer comes back.
     leave: f32,
     closing: Option<Instant>,
@@ -173,13 +177,16 @@ fn run(mut req: Request, style: Style, seq: u64, t_req: Instant) -> Option<crate
         let ring_h = (outer + MARGIN) * 2.0 * s;
         let h = (ring_h + (PILL_GAP + PILL_H + META_H) * s).ceil() as i32;
         let half_w = w / 2;
-        let mon = crate::winutil::monitor_rect_at(cur.x, cur.y);
-        // ring centre on the cursor, the whole window kept on this monitor
+        // ring centred on the cursor, but the whole radial (ring + text pill below it) stays inside the work area
+        // (not under the taskbar): near an edge the ring moves inward instead of being cut off. The window
+        // margin around the ring only holds its shadow, so it may hang over the edge.
+        let wa = crate::winutil::work_rect_at(cur.x, cur.y);
         let cy_off = (ring_h / 2.0) as i32;
-        let ox = (cur.x - half_w).clamp(mon.left, (mon.right - w).max(mon.left));
-        let oy = (cur.y - cy_off).clamp(mon.top, (mon.bottom - h).max(mon.top));
+        let m = (MARGIN * s) as i32;
+        let ox = (cur.x - half_w).clamp(wa.left - m, (wa.right + m - w).max(wa.left - m));
+        let oy = (cur.y - cy_off).clamp(wa.top - m, (wa.bottom - h).max(wa.top - m));
         let origin = POINT { x: ox, y: oy };
-        let c = ((cur.x - ox) as f32, (cur.y - oy) as f32);
+        let c = (half_w as f32, cy_off as f32);
 
         let frame = req.frame.take().or_else(|| crate::winutil::grab_rect(RECT { left: ox, top: oy, right: ox + w, bottom: oy + h }, false).ok().map(Arc::new));
         let bg = frame.as_deref().and_then(|f| gfx::blur_backdrop(f, origin, w, h, style.blur, style.saturation));
@@ -221,10 +228,12 @@ fn run(mut req: Request, style: Style, seq: u64, t_req: Instant) -> Option<crate
             seq,
             t_open: Instant::now(),
             last: Instant::now(),
-            last_cursor: (c.0, c.1),
+            last_cursor: ((cur.x - ox) as f32, (cur.y - oy) as f32),
             glow_pos: (-1000.0, -1000.0),
             last_move: Instant::now(),
             off_since: None,
+            open_at: ((cur.x - ox) as f32, (cur.y - oy) as f32),
+            entered: false,
             leave: 0.0,
             closing: None,
             restore_focus: true,
@@ -235,6 +244,7 @@ fn run(mut req: Request, style: Style, seq: u64, t_req: Instant) -> Option<crate
         });
         SetWindowLongPtrW(st.win.hwnd, GWLP_USERDATA, &mut *st as *mut St as isize);
         paint(&mut st);
+        crate::winutil::prime_cursor(IDC_ARROW);
         let _ = ShowWindow(st.win.hwnd, SW_SHOW);
         crate::winutil::bring_to_front(st.win.hwnd.0 as isize);
         tracing::info!("tag radial visible {} ms after request ({} tags)", t_req.elapsed().as_millis(), st.tags.len());
@@ -262,13 +272,13 @@ fn outcome_toast(st: &St) -> crate::toast::Toast {
     if st.discarded {
         let n = st.sidecars.len();
         let detail = if n > 1 { format!("{n} items were not kept") } else { "The capture was not kept".into() };
-        return crate::toast::Toast { title: "Discarded".into(), detail, thumb: None, ms: 1500 };
+        return crate::toast::Toast { title: "Discarded".into(), detail, thumb: None, ms: 1500, fx: false };
     }
     let tags: Vec<String> = st.tagged.iter().map(|t| format!("#{t}")).collect();
     let what = st.snippet.as_ref().filter(|t| !t.is_empty()).map(|t| format!("“{t}”")).unwrap_or_else(|| st.meta.clone());
     let detail = if tags.is_empty() { what } else { format!("{} · {what}", tags.join(" ")) };
     let title = if st.fav { "Saved to Favourites" } else { "Saved" };
-    crate::toast::Toast { title: title.into(), detail, thumb: st.thumb.clone(), ms: 1700 }
+    crate::toast::Toast { title: title.into(), detail, thumb: st.thumb.clone(), ms: 1700, fx: true }
 }
 
 // ---------- geometry ----------
@@ -556,7 +566,10 @@ fn tick(st: &mut St) {
     }
     if st.closing.is_none() && st.t_open.elapsed().as_secs_f32() * 1000.0 > OPEN_MS {
         // pointer off for OFF_GRACE_MS: fade out; back on it (even mid-fade): fade back in
-        let leaving = if st.inside(x, y) || st.busy() {
+        if !st.entered && (st.inside(x, y) || (x - st.open_at.0).hypot(y - st.open_at.1) > 90.0 * st.s) {
+            st.entered = true;
+        }
+        let leaving = if st.inside(x, y) || st.busy() || !st.entered {
             st.off_since = None;
             false
         } else {
@@ -1203,7 +1216,7 @@ mod tests {
     /// `age_ms`: how long after opening the frame is drawn; `anim`: Menu animation override (petals, fan, ...).
     #[allow(clippy::too_many_arguments)]
     fn scene_at(tags: &[&str], typed: &str, mode: Mode, hover: Hit, applied: Option<usize>, fav: bool, name: &str, age_ms: u64, anim: Option<&str>, ghost: bool) {
-        let s = 1.5;
+        let s: f32 = std::env::var("STASH_PREVIEW_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5);
         let mut style = preview::style();
         if let Some(a) = anim {
             style.anim = crate::theme::OpenAnim::parse(a);
@@ -1266,6 +1279,8 @@ mod tests {
             glow_pos: (w as f32 * 0.66, ring_h * 0.3), // where the cursor glow shows in the previews
             last_move: Instant::now(),
             off_since: None,
+            open_at: (w as f32 * 0.66, ring_h * 0.3),
+            entered: true,
             leave: 0.0,
             closing: None,
             restore_focus: false,

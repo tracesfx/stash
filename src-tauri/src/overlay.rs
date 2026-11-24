@@ -140,6 +140,7 @@ pub fn select_region(frame: &Frame, style: Style, scale: f32) -> Option<RECT> {
         )
         .ok()?;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut *st as *mut State as isize);
+        crate::winutil::prime_cursor(IDC_CROSS);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(hwnd));

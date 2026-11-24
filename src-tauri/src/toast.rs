@@ -27,10 +27,12 @@ pub struct Toast {
     pub detail: String,
     pub thumb: Option<Arc<Thumb>>,
     pub ms: u32,
+    /// A save worth celebrating: a short sparkle burst (Settings > Save sparkle).
+    pub fx: bool,
 }
 
 pub fn notice(app: &AppHandle, msg: &str) {
-    show(app, Toast { title: msg.to_string(), detail: String::new(), thumb: None, ms: 1800 });
+    show(app, Toast { title: msg.to_string(), detail: String::new(), thumb: None, ms: 1800, fx: false });
 }
 
 pub fn show(app: &AppHandle, t: Toast) {
@@ -38,6 +40,8 @@ pub fn show(app: &AppHandle, t: Toast) {
     let style = crate::theme::style_for(&cfg);
     let corner = cfg.appearance.popup_corner.clone();
     let seq = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut t = t;
+    t.fx &= cfg.save_fx && style.animations;
     std::thread::spawn(move || run(t, style, &corner, seq));
 }
 
@@ -59,6 +63,109 @@ struct St {
     done: bool,
     /// The fully shown frame is on screen already.
     still: bool,
+    /// Sparkle burst (empty when off or finished) and the room around the toast it flies in (px per side).
+    sparks: Vec<Spark>,
+    pad: i32,
+}
+
+/// One particle of the save sparkle: starts at the thumbnail / left end of the toast and drifts outward.
+struct Spark {
+    x: f32,
+    y: f32,
+    vx: f32,
+    vy: f32,
+    size: f32,
+    delay: f32,
+    life: f32,
+    color: [u8; 3],
+    star: bool,
+}
+
+/// Room around the toast for the sparkle (logical px per side).
+const FX_PAD: f32 = 44.0;
+/// The burst starts as the toast lands (ms after it opens), and is over this long after that.
+const FX_START: f32 = 70.0;
+const FX_END: f32 = 900.0;
+
+fn sparks(t: &Toast, style: &Style, s: f32, pad: f32, corner: &str, seq: u64) -> Vec<Spark> {
+    let l = Layout::new(t, s);
+    let (ox, oy) = (pad + l.margin + l.pad + l.thumb_sz / 2.0, pad + l.margin + l.h_body / 2.0);
+    // from the rim of the thumbnail (not over the picture), or a small point at the left end of a text toast
+    let r0 = if l.thumb_sz > 0.0 { l.thumb_sz * 0.5 } else { 6.0 * s };
+    // drifts a little into the screen, away from the corner the toast sits in
+    let up = if corner.starts_with('b') { -1.0 } else { 1.0 };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1);
+    let mut r = (seq.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ nanos) | 1;
+    let mut rnd = move || {
+        r ^= r << 13;
+        r ^= r >> 7;
+        r ^= r << 17;
+        (r >> 11) as f32 / (1u64 << 53) as f32
+    };
+    let cols = [style.glass[0], style.glass[1], style.glass[2], style.hover, [255, 255, 255], [255, 236, 190]];
+    (0..16)
+        .map(|i| {
+            let a = rnd() * std::f32::consts::TAU;
+            let sp = (90.0 + rnd() * 170.0) * s;
+            let (dx, dy) = (a.cos(), a.sin());
+            Spark {
+                x: ox + dx * r0,
+                y: oy + dy * r0,
+                vx: dx * sp,
+                vy: (dy * 0.8 + 0.45 * up) * sp,
+                size: (1.3 + rnd() * 2.0) * s,
+                delay: rnd() * 90.0,
+                life: 420.0 + rnd() * 300.0,
+                color: cols[(i + (rnd() * 6.0) as usize) % cols.len()],
+                star: i % 3 == 0,
+            }
+        })
+        .collect()
+}
+
+/// Draws the sparks at `age` ms (since the toast opened). False once they have all faded.
+fn draw_sparks(pm: &mut Pixmap, sparks: &[Spark], age: f32) -> bool {
+    let mut alive = false;
+    for p in sparks {
+        let t = age - FX_START - p.delay;
+        if t < 0.0 {
+            alive = true;
+            continue;
+        }
+        if t > p.life {
+            continue;
+        }
+        alive = true;
+        let k = t / p.life;
+        let ts = t / 1000.0;
+        // drag: the burst slows down as it spreads
+        let drift = (1.0 - (-3.2 * ts).exp()) / 3.2;
+        let (x, y) = (p.x + p.vx * drift, p.y + p.vy * drift);
+        let fade = if k < 0.15 { k / 0.15 } else { 1.0 - ((k - 0.15) / 0.85).powf(1.6) };
+        let sz = p.size * (1.0 - 0.5 * k);
+        let [r, g, b] = p.color;
+        let a = (fade * 255.0) as u8;
+        if let Some(c) = PathBuilder::from_circle(x, y, sz * 2.6) {
+            pm.fill_path(&c, &gfx::paint([r, g, b, (fade * 46.0) as u8]), FillRule::Winding, Transform::identity(), None);
+        }
+        if p.star {
+            // a four-point glint
+            let (l, w) = (sz * 3.2, sz * 0.55);
+            let mut pb = PathBuilder::new();
+            pb.move_to(x, y - l);
+            pb.quad_to(x + w, y - w, x + l, y);
+            pb.quad_to(x + w, y + w, x, y + l);
+            pb.quad_to(x - w, y + w, x - l, y);
+            pb.quad_to(x - w, y - w, x, y - l);
+            pb.close();
+            if let Some(path) = pb.finish() {
+                pm.fill_path(&path, &gfx::paint([255, 255, 255, a]), FillRule::Winding, Transform::identity(), None);
+            }
+        } else if let Some(c) = PathBuilder::from_circle(x, y, sz) {
+            pm.fill_path(&c, &gfx::paint([r.saturating_add(40), g.saturating_add(40), b.saturating_add(40), a]), FillRule::Winding, Transform::identity(), None);
+        }
+    }
+    alive
 }
 
 /// Window size (physical px) for a toast at DPI scale `s`.
@@ -99,7 +206,10 @@ fn run(t: Toast, style: Style, corner: &str, seq: u64) {
         .ok()
         .and_then(|f| gfx::blur_backdrop(&f, origin, w, h, style.blur, style.saturation));
     let Some(pm) = render(&t, &style, s, bg.as_ref()) else { return };
-    show_window(pm, &t, &style, origin, w, h, seq);
+    // the sparkle needs room around the toast: a bigger (click-through, transparent) window, same toast position
+    let pad = if t.fx { (FX_PAD * s) as i32 } else { 0 };
+    let sp = if t.fx { sparks(&t, &style, s, pad as f32, corner, seq) } else { Vec::new() };
+    show_window(pm, &t, &style, POINT { x: origin.x - pad, y: origin.y - pad }, (w + 2 * pad, h + 2 * pad), seq, sp, pad);
 }
 
 /// The static toast scene (rendered once; the window only fades/slides it).
@@ -137,11 +247,12 @@ fn render(t: &Toast, style: &Style, s: f32, bg: Option<&Pixmap>) -> Option<Pixma
     Some(pm)
 }
 
-fn show_window(pm: Pixmap, t: &Toast, style: &Style, origin: POINT, w: i32, h: i32, seq: u64) {
+#[allow(clippy::too_many_arguments)]
+fn show_window(pm: Pixmap, t: &Toast, style: &Style, origin: POINT, (w, h): (i32, i32), seq: u64, sparks: Vec<Spark>, pad: i32) {
     unsafe {
         let ex = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT;
         let Some(win) = Layered::new(w!("StashToast"), w!("Stash"), Some(wnd_proc), ex, origin, w, h) else { return };
-        let mut st = Box::new(St { win, scene: pm, t0: Instant::now(), ms: t.ms as f32, seq, anim: style.animations, done: false, still: false });
+        let mut st = Box::new(St { win, scene: pm, t0: Instant::now(), ms: t.ms as f32, seq, anim: style.animations, done: false, still: false, sparks, pad });
         SetWindowLongPtrW(st.win.hwnd, GWLP_USERDATA, &mut *st as *mut St as isize);
         frame(&mut st);
         let _ = ShowWindow(st.win.hwnd, SW_SHOWNOACTIVATE);
@@ -177,19 +288,24 @@ fn frame(st: &mut St) {
         st.done = true;
         return;
     }
+    let sparking = !st.sparks.is_empty() && age < FX_START + FX_END;
     // while it just sits there the frame never changes: present it once
-    let still = op == 1.0 && rise == 0.0;
+    let still = op == 1.0 && rise == 0.0 && !sparking;
     if still && st.still {
         return;
     }
     st.still = still;
     let (w, h) = (st.scene.width() as f32, st.scene.height() as f32);
     let mut out = gfx::compose(&st.scene, op, 0.97 + 0.03 * op, w / 2.0, h / 2.0);
-    if rise != 0.0 {
-        // slide a few px (up when appearing)
-        let mut moved = Pixmap::new(out.width(), out.height()).unwrap();
-        moved.draw_pixmap(0, (rise * 10.0) as i32, out.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+    if rise != 0.0 || st.pad > 0 {
+        // slide a few px (up when appearing), inside the room left for the sparkle
+        let pad = st.pad.max(0) as u32;
+        let Some(mut moved) = Pixmap::new(out.width() + 2 * pad, out.height() + 2 * pad) else { return };
+        moved.draw_pixmap(st.pad, st.pad + (rise * 10.0) as i32, out.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
         out = moved;
+    }
+    if sparking && !draw_sparks(&mut out, &st.sparks, age) {
+        st.sparks.clear();
     }
     st.win.present(&out);
 }
@@ -219,21 +335,32 @@ mod tests {
     #[test]
     #[ignore]
     fn previews() {
-        let s = 1.5;
+        let s: f32 = std::env::var("STASH_PREVIEW_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(1.5);
         let style = preview::style();
         let frame = preview::backdrop(900, 600);
         let (tw, th) = (90u32, 60u32);
         let rgba: Vec<u8> = (0..tw * th).flat_map(|i| [(60 + (i % tw) * 2) as u8, (90 + (i / tw) * 2) as u8, 210, 255]).collect();
         let toasts = [
-            ("toast_notice.png", Toast { title: "Capture paused".into(), detail: String::new(), thumb: None, ms: 0 }),
-            ("toast_saved.png", Toast { title: "Saved".into(), detail: "Region · 1115×628 · chrome".into(), thumb: Some(Arc::new(Thumb { rgba, w: tw, h: th })), ms: 0 }),
-            ("toast_note.png", Toast { title: "Note saved".into(), detail: "#idea #yt-ref".into(), thumb: None, ms: 0 }),
+            ("toast_notice.png", Toast { title: "Capture paused".into(), detail: String::new(), thumb: None, ms: 0, fx: false }),
+            ("toast_saved.png", Toast { title: "Saved".into(), detail: "Region · 1115×628 · chrome".into(), thumb: Some(Arc::new(Thumb { rgba, w: tw, h: th })), ms: 0, fx: false }),
+            ("toast_note.png", Toast { title: "Note saved".into(), detail: "#idea #yt-ref".into(), thumb: None, ms: 0, fx: false }),
         ];
         for (name, t) in toasts {
             let (w, h) = size(&t, s);
-            let origin = POINT { x: 60, y: 60 };
+            let origin = POINT { x: 120, y: 120 };
             let bg = gfx::blur_backdrop(&frame, origin, w, h, style.blur, style.saturation);
             let pm = render(&t, &style, s, bg.as_ref()).unwrap();
+            if name == "toast_saved.png" {
+                // the save sparkle at a few moments (pad = the room the real window leaves around the toast)
+                let pad = (FX_PAD * s) as i32;
+                let sp = sparks(&t, &style, s, pad as f32, "br", 7);
+                for age in [120u32, 260, 420, 640] {
+                    let mut out = Pixmap::new(pm.width() + 2 * pad as u32, pm.height() + 2 * pad as u32).unwrap();
+                    out.draw_pixmap(pad, pad, pm.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+                    draw_sparks(&mut out, &sp, age as f32);
+                    preview::save(&out, &frame, POINT { x: origin.x - pad, y: origin.y - pad }, &format!("toast_fx_{age}.png"));
+                }
+            }
             preview::save(&pm, &frame, origin, name);
         }
     }

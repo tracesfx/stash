@@ -238,7 +238,7 @@ fn restyle_window(win: &WebviewWindow, cfg: &Config) {
 pub fn apply(app: &AppHandle) {
     let cfg = app.state::<AppState>().cfg();
     crate::gfx::set_fps_cap(cfg.appearance.anim_fps);
-    for label in ["gallery", "settings"] {
+    for label in ["gallery", "settings", crate::tutorial::LABEL] {
         if let Some(w) = app.get_webview_window(label) {
             restyle_window(&w, &cfg);
         }

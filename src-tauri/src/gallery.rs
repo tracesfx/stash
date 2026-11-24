@@ -404,6 +404,7 @@ pub fn gallery_warm_ready(window: tauri::WebviewWindow) -> bool {
 
 pub fn open(app: &AppHandle) {
     note_open("gallery");
+    crate::tutorial::step(app, "gallery");
     let app = app.clone();
     std::thread::spawn(move || {
         if let Some(w) = app.get_webview_window("gallery") {
@@ -453,10 +454,11 @@ pub fn release(app: &AppHandle) {
 
 fn build(app: &AppHandle, warm: bool) -> Option<tauri::WebviewWindow> {
     {
+        let f = crate::settings::scale_factor(&app.state::<AppState>().cfg());
         let b = WebviewWindowBuilder::new(app, "gallery", WebviewUrl::App(if warm { "gallery.html?warm=1" } else { "gallery.html" }.into()))
             .title("Stash")
-            .inner_size(1180.0, 780.0)
-            .min_inner_size(640.0, 420.0)
+            .inner_size(1180.0 * f, 780.0 * f)
+            .min_inner_size(640.0 * f, 420.0 * f)
             .disable_drag_drop_handler() // HTML5 drops (text, links, browser files) are handled by the page
             .transparent(true) // the backdrop (theme::style_window) shows through the translucent page
             .visible(false) // shown by `window_ready` once the page has painted, so it opens with its animation
@@ -467,6 +469,7 @@ fn build(app: &AppHandle, warm: bool) -> Option<tauri::WebviewWindow> {
         match b.build() {
             Ok(w) => {
                 tracing::info!("perf gallery: window built in {} ms", t.elapsed().as_millis());
+                let _ = w.set_zoom(f);
                 crate::theme::style_window(&w, &app.state::<AppState>().cfg());
                 let (ww, a) = (w.clone(), app.clone());
                 w.on_window_event(move |ev| {
@@ -602,6 +605,18 @@ fn reveal(w: &tauri::WebviewWindow) {
 }
 
 fn show_now(w: &tauri::WebviewWindow) {
+    // shown cloaked, revealed a few composed frames later: skips the flat light-grey first frame (white flash)
+    let cloaked = std::env::var_os("STASH_NO_CLOAK").is_none() && w.hwnd().is_ok();
+    if cloaked && let Ok(h) = w.hwnd() {
+        crate::winutil::cloak(h.0 as isize, true);
+    }
+    show_window(w);
+    if cloaked && let Ok(h) = w.hwnd() {
+        crate::winutil::uncloak_after_frames(h.0 as isize, 3);
+    }
+}
+
+fn show_window(w: &tauri::WebviewWindow) {
     // testing aid: show without taking focus, so a test instance never interrupts what the user is doing
     if std::env::var_os("STASH_TEST_NOACTIVATE").is_some() {
         if let Ok(h) = w.hwnd() {
@@ -657,6 +672,9 @@ fn mime_for_ext(ext: &str) -> &'static str {
         "ogg" | "oga" => "audio/ogg",
         "m4a" => "audio/mp4",
         "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "opus" => "audio/ogg",
+        "weba" => "audio/webm",
         "pdf" => "application/pdf",
         e if is_text_ext(e) => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
@@ -766,6 +784,25 @@ pub fn gallery_set_meta(id: String, caption: String, tags: Vec<String>, state: S
         })?;
         crate::tags::bump(&clean);
         Ok(())
+    })())
+}
+
+/// The whole text of a note or link (the list only carries the start of it).
+#[tauri::command]
+pub fn gallery_note_text(id: String, state: State<GalleryState>) -> Result<String, String> {
+    err((|| {
+        let e = entry(&state, &id)?;
+        let t = std::fs::read_to_string(&e.content)?;
+        Ok(t.replace("[InternetShortcut]\r\nURL=", "").trim().to_string())
+    })())
+}
+
+/// Saves an edited note (gallery detail panel).
+#[tauri::command]
+pub fn gallery_set_note_text(id: String, text: String, state: State<GalleryState>) -> Result<(), String> {
+    err((|| {
+        let e = entry(&state, &id)?;
+        library::set_text(&e.sidecar, &e.content, &text)
     })())
 }
 
